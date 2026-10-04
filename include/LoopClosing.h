@@ -31,6 +31,9 @@
 #include <boost/algorithm/string.hpp>
 #include <thread>
 #include <mutex>
+#include <cstdint>
+#include <exception>
+#include <functional>
 #include "Thirdparty/g2o/g2o/types/types_seven_dof_expmap.h"
 
 namespace ORB_SLAM3
@@ -52,7 +55,9 @@ public:
 
 public:
 
-    LoopClosing(Atlas* pAtlas, KeyFrameDatabase* pDB, ORBVocabulary* pVoc,const bool bFixScale, const bool bActiveLC);
+    // The optional shutdown query only observes state and must be thread-safe/nonthrowing.
+    LoopClosing(Atlas* pAtlas, KeyFrameDatabase* pDB, ORBVocabulary* pVoc,const bool bFixScale, const bool bActiveLC,
+                std::function<bool()> shutdownRequested = {});
 
     void SetTracker(Tracking* pTracker);
 
@@ -66,9 +71,6 @@ public:
     void RequestReset();
     void RequestResetActiveMap(Map* pMap);
 
-    // This function will run in a separate thread
-    void RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF);
-
     bool isRunningGBA(){
         unique_lock<std::mutex> lock(mMutexGBA);
         return mbRunningGBA;
@@ -78,7 +80,12 @@ public:
         return mbFinishedGBA;
     }   
 
+    // Stop publishing resets before requesting finish. Run joins its GBA before
+    // reporting finished; the global shutdown query only gates new GBA launches.
     void RequestFinish();
+
+    // Propagate a stored worker failure after joins, or to a waiting reset caller.
+    void RethrowFailure();
 
     bool isFinished();
 
@@ -155,6 +162,16 @@ protected:
     bool mbFinishRequested;
     bool mbFinished;
     std::mutex mMutexFinish;
+    std::exception_ptr mWorkerFailure;
+    const std::function<bool()> mShutdownRequested;
+
+    // Only the LoopClosing owner calls these; RequestFinish may run concurrently.
+    void RunLoop();
+    void RecordFailure(std::exception_ptr failure);
+    bool StartGlobalBundleAdjustment(std::function<void(std::uint64_t)> work);
+    void JoinGlobalBundleAdjustment(bool discardResults);
+    void RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF,
+                                   std::uint64_t generation);
 
     Atlas* mpAtlas;
     Tracking* mpTracker;
@@ -215,15 +232,15 @@ protected:
     // Variables related to Global Bundle Adjustment
     bool mbRunningGBA;
     bool mbFinishedGBA;
-    bool mbStopGBA;
     std::mutex mMutexGBA;
-    std::thread* mpThreadGBA;
+    std::thread mThreadGBA;
+    std::exception_ptr mGBAFailure;
 
     // Fix scale in the stereo/RGB-D case
     bool mbFixScale;
 
 
-    bool mnFullBAIdx;
+    std::uint64_t mnFullBAIdx;
 
 
 

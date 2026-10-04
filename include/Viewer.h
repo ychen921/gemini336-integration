@@ -27,6 +27,7 @@
 #include "Settings.h"
 
 #include <mutex>
+#include "ViewerState.h"
 
 namespace ORB_SLAM3
 {
@@ -48,6 +49,7 @@ public:
     // Main thread function. Draw points, keyframes, the current camera pose and the last processed
     // frame. Drawing is refreshed according to the camera fps. We use Pangolin.
     void Run();
+    void RethrowFailure();
 
     void RequestFinish();
 
@@ -82,15 +84,10 @@ private:
 
     float mViewpointX, mViewpointY, mViewpointZ, mViewpointF;
 
+    void RunLoop(bool &mapWindowCreated, bool &frameWindowCreated);
     bool CheckFinish();
     void SetFinish();
-    bool mbFinishRequested;
-    bool mbFinished;
-    std::mutex mMutexFinish;
-
-    bool mbStopped;
-    bool mbStopRequested;
-    std::mutex mMutexStop;
+    ViewerState mState;
 
     bool mbStopTrack;
 

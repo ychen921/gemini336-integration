@@ -33,6 +33,7 @@
 
 #include <mutex>
 #include <chrono>
+#include <memory>
 
 
 using namespace std;
@@ -1452,6 +1453,7 @@ bool Tracking::GetStepByStep()
 
 
 Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename)
+try
 {
     //cout << "GrabImageStereo" << endl;
 
@@ -1490,6 +1492,11 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 
     //cout << "Incoming frame creation" << endl;
 
+    // Protect replacement and construction's reads of mLastFrame. Tracking must
+    // release this guard before entering its map-locked stage or reset waits.
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.BeginFrame();
+
     if (mSensor == System::STEREO && !mpCamera2)
         mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
     else if(mSensor == System::STEREO && mpCamera2)
@@ -1510,14 +1517,22 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 #endif
 
     //cout << "Tracking start" << endl;
+    frameIMU.Unlock();
     Track();
     //cout << "Tracking end" << endl;
 
     return mCurrentFrame.GetPose();
 }
+catch(...)
+{
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.Fail(std::current_exception());
+    throw;
+}
 
 
 Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename)
+try
 {
     mImGray = imRGB;
     cv::Mat imDepth = imD;
@@ -1540,6 +1555,8 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     if((fabs(mDepthMapFactor-1.0f)>1e-5) || imDepth.type()!=CV_32F)
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.BeginFrame();
     if (mSensor == System::RGBD)
         mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
     else if(mSensor == System::IMU_RGBD)
@@ -1557,13 +1574,21 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
 #endif
 
+    frameIMU.Unlock();
     Track();
 
     return mCurrentFrame.GetPose();
 }
+catch(...)
+{
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.Fail(std::current_exception());
+    throw;
+}
 
 
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
+try
 {
     mImGray = im;
     if(mImGray.channels()==3)
@@ -1581,6 +1606,8 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.BeginFrame();
     if (mSensor == System::MONOCULAR)
     {
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
@@ -1609,9 +1636,16 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 #endif
 
     lastID = mCurrentFrame.mnId;
+    frameIMU.Unlock();
     Track();
 
     return mCurrentFrame.GetPose();
+}
+catch(...)
+{
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.Fail(std::current_exception());
+    throw;
 }
 
 
@@ -1621,23 +1655,26 @@ void Tracking::GrabImuData(const IMU::Point &imuMeasurement)
     mlQueueImuData.push_back(imuMeasurement);
 }
 
-void Tracking::PreintegrateIMU()
+bool Tracking::PreintegrateIMU()
 {
 
     if(!mCurrentFrame.mpPrevFrame)
     {
         Verbose::PrintMess("non prev frame ", Verbose::VERBOSITY_NORMAL);
         mCurrentFrame.setIntegrated();
-        return;
+        return true;
     }
 
     mvImuFromLastFrame.clear();
-    mvImuFromLastFrame.reserve(mlQueueImuData.size());
-    if(mlQueueImuData.size() == 0)
     {
-        Verbose::PrintMess("Not IMU data in mlQueueImuData!!", Verbose::VERBOSITY_NORMAL);
-        mCurrentFrame.setIntegrated();
-        return;
+        const std::lock_guard<std::mutex> lock(mMutexImuQueue);
+        mvImuFromLastFrame.reserve(mlQueueImuData.size());
+        if(mlQueueImuData.empty())
+        {
+            Verbose::PrintMess("Not IMU data in mlQueueImuData!!", Verbose::VERBOSITY_NORMAL);
+            mCurrentFrame.setIntegrated();
+            return false;
+        }
     }
 
     while(true)
@@ -1674,13 +1711,18 @@ void Tracking::PreintegrateIMU()
             usleep(500);
     }
 
-    const int n = mvImuFromLastFrame.size()-1;
-    if(n==0){
+    // One sample cannot define an integration interval. Publish unavailability
+    // instead of leaving UpdateFrameIMU waiting for work that already returned.
+    if(mvImuFromLastFrame.size()<2){
         cout << "Empty IMU measurements vector!!!\n";
-        return;
+        return false;
     }
+    const int n = static_cast<int>(mvImuFromLastFrame.size())-1;
 
-    IMU::Preintegrated* pImuPreintegratedFromLastFrame = new IMU::Preintegrated(mLastFrame.mImuBias,mCurrentFrame.mImuCalib);
+    if(!mpImuPreintegratedFromLastKF)
+        throw std::runtime_error("IMU preintegration requires a keyframe accumulator");
+    std::unique_ptr<IMU::Preintegrated> pImuPreintegratedFromLastFrame =
+        std::make_unique<IMU::Preintegrated>(mLastFrame.mImuBias,mCurrentFrame.mImuCalib);
 
     for(int i=0; i<n; i++)
     {
@@ -1719,17 +1761,16 @@ void Tracking::PreintegrateIMU()
             tstep = mCurrentFrame.mTimeStamp-mCurrentFrame.mpPrevFrame->mTimeStamp;
         }
 
-        if (!mpImuPreintegratedFromLastKF)
-            cout << "mpImuPreintegratedFromLastKF does not exist" << endl;
         mpImuPreintegratedFromLastKF->IntegrateNewMeasurement(acc,angVel,tstep);
         pImuPreintegratedFromLastFrame->IntegrateNewMeasurement(acc,angVel,tstep);
     }
 
-    mCurrentFrame.mpImuPreintegratedFrame = pImuPreintegratedFromLastFrame;
+    mCurrentFrame.mpImuPreintegratedFrame = pImuPreintegratedFromLastFrame.release();
     mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
     mCurrentFrame.mpLastKeyFrame = mpLastKeyFrame;
 
     mCurrentFrame.setIntegrated();
+    return true;
 
     //Verbose::PrintMess("Preintegration is finished!! ", Verbose::VERBOSITY_DEBUG);
 }
@@ -1793,17 +1834,25 @@ void Tracking::ResetFrameIMU()
 
 void Tracking::Track()
 {
+    mpLocalMapper->RethrowFailure();
+    mpLoopClosing->RethrowFailure();
+    if (mpViewer) mpViewer->RethrowFailure();
 
     if (bStepByStep)
     {
         std::cout << "Tracking: Waiting to the next step" << std::endl;
-        while(!mbStep && bStepByStep)
+        // Shutdown releases this pause so an already admitted frame can finish;
+        // it does not cancel tracking or return a partially processed frame.
+        while(!mbStep && bStepByStep && !mpSystem->isShutdownRequested())
             usleep(500);
         mbStep = false;
     }
 
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
     if(mpLocalMapper->mbBadImu)
     {
+        frameIMU.Invalidate();
+        frameIMU.Unlock();
         cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
         mpSystem->ResetActiveMap();
         return;
@@ -1812,13 +1861,15 @@ void Tracking::Track()
     Map* pCurrentMap = mpAtlas->GetCurrentMap();
     if(!pCurrentMap)
     {
-        cout << "ERROR: There is not an active map in the atlas" << endl;
+        throw std::runtime_error("Tracking requires an active map for IMU/frame production");
     }
 
     if(mState!=NO_IMAGES_YET)
     {
         if(mLastFrame.mTimeStamp>mCurrentFrame.mTimeStamp)
         {
+            frameIMU.Invalidate();
+            frameIMU.Unlock();
             cerr << "ERROR: Frame with a timestamp older than previous frame detected!" << endl;
             unique_lock<mutex> lock(mMutexImuQueue);
             mlQueueImuData.clear();
@@ -1831,6 +1882,8 @@ void Tracking::Track()
             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
             if(mpAtlas->isInertial())
             {
+                frameIMU.Invalidate();
+                frameIMU.Unlock();
 
                 if(mpAtlas->isImuInitialized())
                 {
@@ -1859,31 +1912,51 @@ void Tracking::Track()
     if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && mpLastKeyFrame)
         mCurrentFrame.SetNewBias(mpLastKeyFrame->GetImuBias());
 
-    if(mState==NO_IMAGES_YET)
+    // Capture this before changing state: the first image establishes the
+    // timeline and may intentionally carry no IMU batch. There is no previous
+    // image interval to integrate, even though mpPrevFrame points at mLastFrame.
+    const bool firstFrame = mState == NO_IMAGES_YET;
+    if(firstFrame)
     {
         mState = NOT_INITIALIZED;
     }
 
     mLastProcessedState=mState;
 
-    if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap)
+    if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) &&
+        !firstFrame && !mbCreatedMap)
     {
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartPreIMU = std::chrono::steady_clock::now();
 #endif
-        PreintegrateIMU();
+        frameIMU.StartPreintegration();
+        const bool available = PreintegrateIMU();
+        frameIMU.Complete(available);
+        if(!available)
+            throw std::runtime_error("IMU measurements cannot define a frame preintegration interval");
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_EndPreIMU = std::chrono::steady_clock::now();
 
         double timePreImu = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndPreIMU - time_StartPreIMU).count();
         vdIMUInteg_ms.push_back(timePreImu);
 #endif
-
     }
+    else
+        // No interval (first image/new map/non-inertial mode) is terminal but
+        // unavailable to IMU update consumers; do not fabricate ready operands.
+        frameIMU.Complete(false);
     mbCreatedMap = false;
+
+    // Preintegration uses the IMU queue, never the map-update lock. Releasing
+    // here lets a consumer holding that map lock wait without a lock cycle.
+    frameIMU.Unlock();
 
     // Get Map Mutex -> Map cannot be changed
     unique_lock<mutex> lock(pCurrentMap->mMutexMapUpdate);
+    // A background update may fail while this frame is waiting for the map lock.
+    // Do not continue tracking on a map whose update did not complete.
+    mpLocalMapper->RethrowFailure();
+    mpLoopClosing->RethrowFailure();
 
     mbMapUpdated = false;
 
@@ -2323,7 +2396,8 @@ void Tracking::Track()
     if (Stop()) {
 
         // Safe area to stop
-        while(isStopped())
+        // The frame is complete here; shutdown must not wait for a manual resume.
+        while(isStopped() && !mpSystem->isShutdownRequested())
         {
             usleep(3000);
         }
@@ -2338,7 +2412,8 @@ void Tracking::StereoInitialization()
     {
         if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
         {
-            if (!mCurrentFrame.mpImuPreintegrated || !mLastFrame.mpImuPreintegrated)
+            if (!mCurrentFrame.mpImuPreintegrated || !mLastFrame.mpImuPreintegrated ||
+                !mCurrentFrame.mpImuPreintegratedFrame || !mLastFrame.mpImuPreintegratedFrame)
             {
                 cout << "not IMU meas" << endl;
                 return;
@@ -2661,6 +2736,10 @@ void Tracking::CreateInitialMapMonocular()
 
 void Tracking::CreateMapInAtlas()
 {
+    // No producer will complete the replaced frame. Serialize replacement with
+    // consumers and notify waiters before publishing the new map/frame state.
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.Invalidate();
     mnLastInitFrameId = mCurrentFrame.mnId;
     mpAtlas->CreateNewMap();
     if (mSensor==System::IMU_STEREO || mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_RGBD)
@@ -3778,13 +3857,22 @@ bool Tracking::Relocalization()
 
 void Tracking::Reset(bool bLocMap)
 {
+    {
+        FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+        frameIMU.Invalidate();
+    }
+    // Never retain the frame guard while asking mapping/loop workers to reset.
     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
 
     if(mpViewer)
     {
         mpViewer->RequestStop();
-        while(!mpViewer->isStopped())
+        while(!mpViewer->isStopped() && !mpViewer->isFinished())
+        {
+            mpViewer->RethrowFailure();
             usleep(3000);
+        }
+        mpViewer->RethrowFailure();
     }
 
     // Reset Local Mapping
@@ -3800,6 +3888,8 @@ void Tracking::Reset(bool bLocMap)
     Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
     mpLoopClosing->RequestReset();
     Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
 
     // Clear BoW Database
     Verbose::PrintMess("Reseting Database...", Verbose::VERBOSITY_NORMAL);
@@ -3839,12 +3929,20 @@ void Tracking::Reset(bool bLocMap)
 
 void Tracking::ResetActiveMap(bool bLocMap)
 {
+    {
+        FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+        frameIMU.Invalidate();
+    }
     Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
     if(mpViewer)
     {
         mpViewer->RequestStop();
-        while(!mpViewer->isStopped())
+        while(!mpViewer->isStopped() && !mpViewer->isFinished())
+        {
+            mpViewer->RethrowFailure();
             usleep(3000);
+        }
+        mpViewer->RethrowFailure();
     }
 
     Map* pMap = mpAtlas->GetCurrentMap();
@@ -3860,6 +3958,8 @@ void Tracking::ResetActiveMap(bool bLocMap)
     Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
     mpLoopClosing->RequestResetActiveMap(pMap);
     Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
 
     // Clear BoW Database
     Verbose::PrintMess("Reseting Database", Verbose::VERBOSITY_NORMAL);
@@ -3977,8 +4077,30 @@ void Tracking::InformOnlyTracking(const bool &flag)
     mbOnlyTracking = flag;
 }
 
-void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame)
+FrameImuState::Guard Tracking::PrepareFrameIMUUpdate(Map* pMap)
 {
+    FrameImuState::Guard frameIMU = mFrameIMU.Lock();
+    frameIMU.WaitUntilReady();
+    // A completed preintegration flow does not imply that all propagation
+    // operands exist (e.g. the first frame). Validate before any caller mutation.
+    if(!mLastFrame.mpLastKeyFrame ||
+       (mLastFrame.mnId != mLastFrame.mpLastKeyFrame->mnFrameId && !mLastFrame.mpImuPreintegrated) ||
+       (mCurrentFrame.mpImuPreintegrated && !mCurrentFrame.mpLastKeyFrame))
+        throw std::runtime_error("IMU frame update is missing propagation data");
+    if(!pMap || pMap != mpAtlas->GetCurrentMap() ||
+       mLastFrame.mpLastKeyFrame->GetMap() != pMap ||
+       (mCurrentFrame.mpImuPreintegrated && mCurrentFrame.mpLastKeyFrame->GetMap() != pMap))
+        throw std::runtime_error("IMU frame update belongs to a different map");
+    return frameIMU;
+}
+
+void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame,
+                              const FrameImuState::Guard& frameIMU)
+{
+    if(!frameIMU.Owns(mFrameIMU) || frameIMU.GetState() != FrameImuState::State::Completed)
+        throw std::logic_error("IMU frame update requires a ready frame guard");
+    if(!pCurrentKeyFrame)
+        throw std::runtime_error("IMU frame update requires a current keyframe");
     Map * pMap = pCurrentKeyFrame->GetMap();
     unsigned int index = mnFirstFrameId;
     list<ORB_SLAM3::KeyFrame*>::iterator lRit = mlpReferences.begin();
@@ -4007,12 +4129,6 @@ void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurr
 
     mLastFrame.SetNewBias(mLastBias);
     mCurrentFrame.SetNewBias(mLastBias);
-
-    while(!mCurrentFrame.imuIsPreintegrated())
-    {
-        usleep(500);
-    }
-
 
     if(mLastFrame.mnId == mLastFrame.mpLastKeyFrame->mnFrameId)
     {

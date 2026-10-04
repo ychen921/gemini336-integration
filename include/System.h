@@ -26,6 +26,9 @@
 #include<stdlib.h>
 #include<string>
 #include<thread>
+#include <atomic>
+#include <functional>
+#include <exception>
 #include<opencv2/core/core.hpp>
 
 #include "Tracking.h"
@@ -102,7 +105,15 @@ public:
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     // Initialize the SLAM system. It launches the Local Mapping, Loop Closing and Viewer threads.
-    System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer = true, const int initFr = 0, const string &strSequence = std::string());
+    // The optional query must be nonthrowing, thread-safe and remain valid for this
+    // System's lifetime. It only observes external stop state; it must not perform cleanup.
+    // Viewer notification runs on the Viewer thread, must not wait for Shutdown,
+    // and its captured resources must remain valid until that thread joins.
+    System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
+           const bool bUseViewer = true, const int initFr = 0,
+           const string &strSequence = std::string(),
+           std::function<bool()> externalStopRequested = {},
+           std::function<void(std::exception_ptr)> viewerStopNotification = {});
 
     // Proccess the given stereo frame. Images must be synchronized and rectified.
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
@@ -134,10 +145,18 @@ public:
     void Reset();
     void ResetActiveMap();
 
-    // All threads will be requested to finish.
-    // It waits until all threads have finished.
+    // Publish a permanent request without waiting or accessing worker/map locks.
+    // Safe concurrently with tracking while this System remains alive.
+    void RequestShutdown() noexcept;
+    bool isShutdownRequested() const;
+    // Called by Viewer only; the owner must wait for tracking before Shutdown.
+    void NotifyViewerStop(bool saveTrajectory, std::exception_ptr error = {}) noexcept;
+
+    // Call from the owner after tracking callers have returned. Joins Viewer,
+    // mapping/loop closing and GBA before reporting background errors.
     // This function must be called before saving the trajectory.
     void Shutdown();
+    // Reports entry into Shutdown(), not completion of background threads.
     bool isShutDown();
 
     // Save camera trajectory in the TUM RGB-D dataset format.
@@ -248,6 +267,14 @@ private:
 
     // Shutdown flag
     bool mbShutDown;
+    // Serializes shutdown waiters only; workers and request publication never use it.
+    std::mutex mMutexShutdown;
+    // Separate request publication from serialized shutdown and resource teardown.
+    std::atomic<bool> mbShutdownRequested{false};
+    const std::function<bool()> mExternalStopRequested;
+    const std::function<void(std::exception_ptr)> mViewerStopNotification;
+    std::atomic<bool> mViewerSaveRequested{false};
+    bool mShutdownCompleted = false;
 
     // Tracking state
     int mTrackingState;

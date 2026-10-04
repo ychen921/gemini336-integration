@@ -21,6 +21,7 @@
 #include "System.h"
 #include "Converter.h"
 #include <thread>
+#include <utility>
 #include <pangolin/pangolin.h>
 #include <iomanip>
 #include <openssl/md5.h>
@@ -39,9 +40,13 @@ namespace ORB_SLAM3
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
-               const bool bUseViewer, const int initFr, const string &strSequence):
+               const bool bUseViewer, const int initFr, const string &strSequence,
+               std::function<bool()> externalStopRequested,
+               std::function<void(std::exception_ptr)> viewerStopNotification):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
-    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
+    mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false),
+    mExternalStopRequested(std::move(externalStopRequested)),
+    mViewerStopNotification(std::move(viewerStopNotification))
 {
     // Output welcome message
     cout << endl <<
@@ -191,10 +196,12 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
                              mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence);
 
-    //Initialize the Local Mapping thread and launch
+    // Construct/configure workers before launching their threads.
     mpLocalMapper = new LocalMapping(this, mpAtlas, mSensor==MONOCULAR || mSensor==IMU_MONOCULAR,
                                      mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO || mSensor==IMU_RGBD, strSequence);
-    mptLocalMapping = new thread(&ORB_SLAM3::LocalMapping::Run,mpLocalMapper);
+    mptLocalMapping = nullptr;
+    mptLoopClosing = nullptr;
+    mptViewer = nullptr;
     mpLocalMapper->mInitFr = initFr;
     if(settings_)
         mpLocalMapper->mThFarPoints = settings_->thFarPoints();
@@ -208,10 +215,10 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     else
         mpLocalMapper->mbFarPoints = false;
 
-    //Initialize the Loop Closing thread and launch
+    // Construct Loop Closing; pointer wiring follows before launch.
     // mSensor!=MONOCULAR && mSensor!=IMU_MONOCULAR
-    mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, activeLC); // mSensor!=MONOCULAR);
-    mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
+    mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, activeLC,
+        [this]() { return isShutdownRequested(); });
 
     //Set pointers between threads
     mpTracker->SetLocalMapper(mpLocalMapper);
@@ -225,12 +232,11 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     //usleep(10*1000*1000);
 
-    //Initialize the Viewer thread and launch
+    // Construct/configure Viewer before launch.
     if(bUseViewer)
     //if(false) // TODO
     {
         mpViewer = new Viewer(this, mpFrameDrawer,mpMapDrawer,mpTracker,strSettingsFile,settings_);
-        mptViewer = new thread(&Viewer::Run, mpViewer);
         mpTracker->SetViewer(mpViewer);
         mpLoopCloser->mpViewer = mpViewer;
         mpViewer->both = mpFrameDrawer->both;
@@ -238,6 +244,11 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     // Fix verbosity
     Verbose::SetTh(Verbose::VERBOSITY_QUIET);
+
+    // Publish complete worker wiring/settings before any worker can observe them.
+    mptLocalMapping = new thread(&ORB_SLAM3::LocalMapping::Run, mpLocalMapper);
+    mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
+    if (mpViewer) mptViewer = new thread(&Viewer::Run, mpViewer);
 
 }
 
@@ -512,8 +523,36 @@ void System::ResetActiveMap()
     mbResetActiveMap = true;
 }
 
+void System::RequestShutdown() noexcept
+{
+    // Worker checks are introduced separately; publishing must not block tracking.
+    mbShutdownRequested.store(true);
+}
+
+bool System::isShutdownRequested() const
+{
+    return mbShutdownRequested.load() ||
+           (mExternalStopRequested && mExternalStopRequested());
+}
+
+void System::NotifyViewerStop(bool saveTrajectory, std::exception_ptr error) noexcept
+{
+    // Save intent precedes stop publication, so the owner cannot miss it at join.
+    if (saveTrajectory) mViewerSaveRequested.store(true);
+    RequestShutdown();
+    if (mViewerStopNotification)
+    {
+        try { mViewerStopNotification(error); }
+        catch (...) { /* Owner still observes the permanent local stop request. */ }
+    }
+}
+
 void System::Shutdown()
 {
+    RequestShutdown();
+    // Only owner callers may wait here; workers never perform blocking shutdown.
+    const std::lock_guard<std::mutex> shutdownLock(mMutexShutdown);
+    if (mShutdownCompleted) return;
     {
         unique_lock<mutex> lock(mMutexReset);
         mbShutDown = true;
@@ -523,28 +562,17 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-    /*if(mpViewer)
-    {
-        mpViewer->RequestFinish();
-        while(!mpViewer->isFinished())
-            usleep(5000);
-    }*/
+    if (mpViewer) mpViewer->RequestFinish();
+    if (mptViewer && mptViewer->joinable()) mptViewer->join();
 
-    // Restore the original wait, including its early exit while GBA is running.
-    // This does not guarantee that all background threads have stopped.
-    while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
-    {
-        if(!mpLocalMapper->isFinished())
-            cout << "mpLocalMapper is not finished" << endl;
-        if(!mpLoopCloser->isFinished())
-            cout << "mpLoopCloser is not finished" << endl;
-        if(mpLoopCloser->isRunningGBA()){
-            cout << "mpLoopCloser is running GBA" << endl;
-            cout << "break anyway..." << endl;
-            break;
-        }
-        usleep(5000);
-    }
+    // LoopClosing joins GBA before returning. Keep mapping, maps and tracking
+    // alive throughout that wait; a finished mapper also satisfies its stop waits.
+    if(mptLoopClosing && mptLoopClosing->joinable()) mptLoopClosing->join();
+    if(mptLocalMapping && mptLocalMapping->joinable()) mptLocalMapping->join();
+    // Report worker failure only after all workers have actually exited.
+    if (mpViewer) mpViewer->RethrowFailure();
+    mpLoopCloser->RethrowFailure();
+    mpLocalMapper->RethrowFailure();
 
     if(!mStrSaveAtlasToFile.empty())
     {
@@ -552,8 +580,28 @@ void System::Shutdown()
         SaveAtlas(FileType::BINARY_FILE);
     }
 
-    /*if(mpViewer)
-        pangolin::BindToContext("ORB-SLAM2: Map Viewer");*/
+    if (mViewerSaveRequested.load())
+    {
+        // The existing EuRoC exporters assume a map with at least one keyframe.
+        // GUI Stop before initialization must still complete safely.
+        bool hasKeyFrames = false;
+        for (Map* map : mpAtlas->GetAllMaps())
+        {
+            if (!map->GetAllKeyFrames().empty())
+            {
+                hasKeyFrames = true;
+                break;
+            }
+        }
+        if (hasKeyFrames)
+        {
+            SaveTrajectoryEuRoC("CameraTrajectory.txt");
+            SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
+        }
+        else
+            cout << "Viewer trajectory save skipped: no keyframes" << endl;
+    }
+    mShutdownCompleted = true;
 
 #ifdef REGISTER_TIMES
     mpTracker->PrintTimeStats();
@@ -1547,4 +1595,3 @@ string System::CalculateCheckSum(string filename, int type)
 }
 
 } //namespace ORB_SLAM
-

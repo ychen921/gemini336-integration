@@ -27,7 +27,7 @@ namespace ORB_SLAM3
 
 Viewer::Viewer(System* pSystem, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Tracking *pTracking, const string &strSettingPath, Settings* settings):
     both(false), mpSystem(pSystem), mpFrameDrawer(pFrameDrawer),mpMapDrawer(pMapDrawer), mpTracker(pTracking),
-    mbFinishRequested(false), mbFinished(true), mbStopped(true), mbStopRequested(false)
+    mState()
 {
     if(settings){
         newParameterLoader(settings);
@@ -161,10 +161,50 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
 
 void Viewer::Run()
 {
-    mbFinished = false;
-    mbStopped = false;
+    bool mapWindowCreated = false;
+    bool frameWindowCreated = false;
+    try
+    {
+        if (mState.Start()) RunLoop(mapWindowCreated, frameWindowCreated);
+    }
+    catch (...)
+    {
+        mState.RecordFailure(std::current_exception());
+        mpSystem->NotifyViewerStop(false, std::current_exception());
+    }
+    // Clean each GUI resource on its creating thread, even if another cleanup fails.
+    if (frameWindowCreated)
+    {
+        try { cv::destroyWindow("ORB-SLAM3: Current Frame"); }
+        catch (...)
+        {
+            mState.RecordFailure(std::current_exception());
+            mpSystem->NotifyViewerStop(false, std::current_exception());
+        }
+    }
+    if (mapWindowCreated)
+    {
+        try { pangolin::DestroyWindow("ORB-SLAM3: Map Viewer"); }
+        catch (...)
+        {
+            mState.RecordFailure(std::current_exception());
+            mpSystem->NotifyViewerStop(false, std::current_exception());
+        }
+    }
+    SetFinish();
+}
 
+void Viewer::RunLoop(bool &mapWindowCreated, bool &frameWindowCreated)
+{
+    if (CheckFinish() || mpSystem->isShutdownRequested()) return;
+    // Honor a reset published before this thread started, before reading any map.
+    while (Stop())
+    {
+        if (CheckFinish() || mpSystem->isShutdownRequested()) return;
+        usleep(3000);
+    }
     pangolin::CreateWindowAndBind("ORB-SLAM3: Map Viewer",1024,768);
+    mapWindowCreated = true;
 
     // 3D Mouse handler requires depth testing to be enabled
     glEnable(GL_DEPTH_TEST);
@@ -205,6 +245,7 @@ void Viewer::Run()
     pangolin::OpenGlMatrix Ow; // Oriented with g in the z axis
     Ow.SetIdentity();
     cv::namedWindow("ORB-SLAM3: Current Frame");
+    frameWindowCreated = true;
 
     bool bFollow = true;
     bool bLocalizationMode = false;
@@ -221,6 +262,25 @@ void Viewer::Run()
     cout << "Starting the Viewer" << endl;
     while(1)
     {
+        if (CheckFinish() || mpSystem->isShutdownRequested()) break;
+        if (pangolin::ShouldQuit())
+        {
+            mpSystem->NotifyViewerStop(false);
+            break;
+        }
+        // While reset holds the pause, pump window events without touching map/frame.
+        if (Stop())
+        {
+            pangolin::GetBoundWindow()->ProcessEvents();
+            cv::waitKey(1);
+            if (pangolin::ShouldQuit() || menuStop)
+            {
+                mpSystem->NotifyViewerStop(static_cast<bool>(menuStop));
+                break;
+            }
+            usleep(3000);
+            continue;
+        }
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         mpMapDrawer->GetCurrentOpenGLCameraMatrix(Twc,Ow);
@@ -354,95 +414,25 @@ void Viewer::Run()
             menuReset = false;
         }
 
-        if(menuStop)
+        // OpenCV's GTK backend does not support WND_PROP_VISIBLE; its -1
+        // result must not be interpreted as a user closing the frame window.
+        if(menuStop || pangolin::ShouldQuit())
         {
-            if(bLocalizationMode)
-                mpSystem->DeactivateLocalizationMode();
-
-            // Stop all threads
-            mpSystem->Shutdown();
-
-            // Save camera trajectory
-            mpSystem->SaveTrajectoryEuRoC("CameraTrajectory.txt");
-            mpSystem->SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
-            menuStop = false;
-        }
-
-        if(Stop())
-        {
-            while(isStopped())
-            {
-                usleep(3000);
-            }
-        }
-
-        if(CheckFinish())
+            mpSystem->NotifyViewerStop(static_cast<bool>(menuStop));
             break;
+        }
     }
-
-    SetFinish();
 }
 
-void Viewer::RequestFinish()
-{
-    unique_lock<mutex> lock(mMutexFinish);
-    mbFinishRequested = true;
-}
-
-bool Viewer::CheckFinish()
-{
-    unique_lock<mutex> lock(mMutexFinish);
-    return mbFinishRequested;
-}
-
-void Viewer::SetFinish()
-{
-    unique_lock<mutex> lock(mMutexFinish);
-    mbFinished = true;
-}
-
-bool Viewer::isFinished()
-{
-    unique_lock<mutex> lock(mMutexFinish);
-    return mbFinished;
-}
-
-void Viewer::RequestStop()
-{
-    unique_lock<mutex> lock(mMutexStop);
-    if(!mbStopped)
-        mbStopRequested = true;
-}
-
-bool Viewer::isStopped()
-{
-    unique_lock<mutex> lock(mMutexStop);
-    return mbStopped;
-}
-
-bool Viewer::Stop()
-{
-    unique_lock<mutex> lock(mMutexStop);
-    unique_lock<mutex> lock2(mMutexFinish);
-
-    if(mbFinishRequested)
-        return false;
-    else if(mbStopRequested)
-    {
-        mbStopped = true;
-        mbStopRequested = false;
-        return true;
-    }
-
-    return false;
-
-}
-
-void Viewer::Release()
-{
-    unique_lock<mutex> lock(mMutexStop);
-    mbStopped = false;
-}
+void Viewer::RequestFinish() { mState.RequestFinish(); }
+bool Viewer::CheckFinish() { return mState.FinishRequested(); }
+void Viewer::SetFinish() { mState.Finish(); }
+bool Viewer::isFinished() { return mState.IsFinished(); }
+void Viewer::RequestStop() { mState.RequestStop(); }
+bool Viewer::isStopped() { return mState.IsStopped(); }
+bool Viewer::Stop() { return mState.Pause(); }
+void Viewer::Release() { mState.Release(); }
+void Viewer::RethrowFailure() { mState.RethrowFailure(); }
 
 /*void Viewer::SetTrackingPause()
 {

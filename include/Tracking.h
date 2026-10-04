@@ -29,6 +29,8 @@
 #include "LocalMapping.h"
 #include "LoopClosing.h"
 #include "Frame.h"
+#include "FrameImuState.h"
+#include <atomic>
 #include "ORBVocabulary.h"
 #include "KeyFrameDatabase.h"
 #include "ORBextractor.h"
@@ -88,7 +90,11 @@ public:
     // Use this function if you have deactivated local mapping and you only want to localize the camera.
     void InformOnlyTracking(const bool &flag);
 
-    void UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame);
+    // Call with the map-update lock held. Acquire readiness before applying map
+    // scale/rotation, and keep this guard until UpdateFrameIMU has completed.
+    FrameImuState::Guard PrepareFrameIMUUpdate(Map* pMap);
+    void UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame,
+                        const FrameImuState::Guard& frameIMU);
     KeyFrame* GetLastKeyFrame()
     {
         return mpLastKeyFrame;
@@ -156,7 +162,7 @@ public:
 
     // frames with estimated pose
     int mTrackedFr;
-    bool mbStep;
+    std::atomic<bool> mbStep;
 
     // True if local mapping is deactivated and we are performing only localization
     bool mbOnlyTracking;
@@ -224,7 +230,7 @@ protected:
     void CreateNewKeyFrame();
 
     // Perform preintegration from last frame
-    void PreintegrateIMU();
+    bool PreintegrateIMU();
 
     // Reset IMU biases and compute frame velocity
     void ResetFrameIMU();
@@ -240,6 +246,7 @@ protected:
     // Vector of IMU measurements from previous to current frame (to be filled by PreintegrateIMU)
     std::vector<IMU::Point> mvImuFromLastFrame;
     std::mutex mMutexImuQueue;
+    FrameImuState mFrameIMU;
 
     // Imu calibration parameters
     IMU::Calib *mpImuCalib;
@@ -281,7 +288,7 @@ protected:
     Viewer* mpViewer;
     FrameDrawer* mpFrameDrawer;
     MapDrawer* mpMapDrawer;
-    bool bStepByStep;
+    std::atomic<bool> bStepByStep;
 
     //Atlas
     Atlas* mpAtlas;

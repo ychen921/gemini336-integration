@@ -28,6 +28,7 @@
 #include "Settings.h"
 
 #include <mutex>
+#include <exception>
 
 
 namespace ORB_SLAM3
@@ -68,8 +69,15 @@ public:
 
     void InterruptBA();
 
+    // Permanent worker exit, unlike the System's global shutdown request. Callers
+    // must stop publishing new reset requests before requesting finish; pending
+    // resets are settled before Run returns. Current work completes naturally or
+    // preserves its failure for callers; a failed worker still awaits explicit finish.
     void RequestFinish();
     bool isFinished();
+    // Reset/Tracking callers must observe a failed worker instead of waiting
+    // indefinitely or using a partially updated map. Shutdown reports after joins.
+    void RethrowFailure();
 
     int KeyframesInQueue(){
         unique_lock<std::mutex> lock(mMutexNewKFs);
@@ -131,6 +139,9 @@ public:
 #endif
 protected:
 
+    void RunLoop();
+    void RecordFailure(std::exception_ptr failure);
+
     bool CheckNewKeyFrames();
     void ProcessNewKeyFrame();
     void CreateNewMapPoints();
@@ -155,6 +166,7 @@ protected:
     bool mbFinishRequested;
     bool mbFinished;
     std::mutex mMutexFinish;
+    std::exception_ptr mWorkerFailure;
 
     Atlas* mpAtlas;
 

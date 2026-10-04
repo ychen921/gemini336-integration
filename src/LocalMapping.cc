@@ -63,12 +63,69 @@ void LocalMapping::SetTracker(Tracking *pTracker)
 
 void LocalMapping::Run()
 {
-    mbFinished = false;
+    {
+        const std::lock_guard<std::mutex> lock(mMutexFinish);
+        mbFinished = false;
+    }
+
+    try
+    {
+        RethrowFailure();
+        RunLoop();
+    }
+    catch(...)
+    {
+        RecordFailure(std::current_exception());
+        bInitializing = false;
+        SetAcceptKeyFrames(false);
+        {
+            const std::lock_guard<std::mutex> lock(mMutexStop);
+            mbStopped = true;
+        }
+        if(mpSystem) mpSystem->RequestShutdown();
+        // Failure closes mapping work, but is not an implicit finish command.
+        // Keep the worker alive while admitted Tracking/reset callers unwind.
+        while(!CheckFinish())
+        {
+            try { ResetIfRequested(); }
+            catch(...) { RecordFailure(std::current_exception()); }
+            usleep(3000);
+        }
+    }
+    try { ResetIfRequested(); }
+    catch(...) { RecordFailure(std::current_exception()); }
+    SetAcceptKeyFrames(false);
+    SetFinish();
+}
+
+void LocalMapping::RecordFailure(std::exception_ptr failure)
+{
+    const std::lock_guard<std::mutex> lock(mMutexFinish);
+    if(!mWorkerFailure) mWorkerFailure = failure;
+}
+
+void LocalMapping::RethrowFailure()
+{
+    std::exception_ptr failure;
+    {
+        const std::lock_guard<std::mutex> lock(mMutexFinish);
+        failure = mWorkerFailure;
+    }
+    if(failure) std::rethrow_exception(failure);
+}
+
+void LocalMapping::RunLoop()
+{
 
     while(1)
     {
         // Tracking will see that Local Mapping is busy
         SetAcceptKeyFrames(false);
+
+        // Only explicit finish ends this worker. A global shutdown request can
+        // arrive while tracking still needs mapping/reset acknowledgements.
+        if(CheckFinish())
+            break;
 
         // Check if there are keyframes in the queue
         if(CheckNewKeyFrames() && !mbBadImu)
@@ -178,7 +235,10 @@ void LocalMapping::Run()
 #endif
 
                 // Initialize IMU here
-                if(!mpCurrentKeyFrame->GetMap()->isImuInitialized() && mbInertial)
+                // Do not start optional initialization after shutdown publication;
+                // an initialization already in progress still completes normally.
+                if(!mpCurrentKeyFrame->GetMap()->isImuInitialized() && mbInertial &&
+                   !mpSystem->isShutdownRequested() && !CheckFinish())
                 {
                     if (mbMonocular)
                         InitializeIMU(1e2, 1e10, true);
@@ -202,7 +262,8 @@ void LocalMapping::Run()
                     if(mpCurrentKeyFrame->GetMap()->isImuInitialized() && mpTracker->mState==Tracking::OK) // Enter here everytime local-mapping is called
                     {
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA1()){
-                            if (mTinit>5.0f)
+                            // Check at each launch boundary: shutdown may arrive during LBA.
+                            if (mTinit>5.0f && !mpSystem->isShutdownRequested() && !CheckFinish())
                             {
                                 cout << "start VIBA 1" << endl;
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA1();
@@ -215,7 +276,7 @@ void LocalMapping::Run()
                             }
                         }
                         else if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2()){
-                            if (mTinit>15.0f){
+                            if (mTinit>15.0f && !mpSystem->isShutdownRequested() && !CheckFinish()){
                                 cout << "start VIBA 2" << endl;
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
                                 if (mbMonocular)
@@ -235,7 +296,7 @@ void LocalMapping::Run()
                                 (mTinit>55.0f && mTinit<55.5f)||
                                 (mTinit>65.0f && mTinit<65.5f)||
                                 (mTinit>75.0f && mTinit<75.5f))){
-                            if (mbMonocular)
+                            if (mbMonocular && !mpSystem->isShutdownRequested() && !CheckFinish())
                                 ScaleRefinement();
                         }
                     }
@@ -261,24 +322,23 @@ void LocalMapping::Run()
             // Safe area to stop
             while(isStopped() && !CheckFinish())
             {
+                // A paused mapper must still acknowledge reset requests from
+                // tracking; otherwise shutdown can stall before callbacks return.
+                ResetIfRequested();
                 usleep(3000);
             }
-            if(CheckFinish())
-                break;
         }
 
         ResetIfRequested();
 
-        // Tracking will see that Local Mapping is busy
-        SetAcceptKeyFrames(true);
-
         if(CheckFinish())
             break;
+
+        SetAcceptKeyFrames(true);
 
         usleep(3000);
     }
 
-    SetFinish();
 }
 
 void LocalMapping::InsertKeyFrame(KeyFrame *pKF)
@@ -857,9 +917,11 @@ bool LocalMapping::stopRequested()
 
 void LocalMapping::Release()
 {
-    unique_lock<mutex> lock(mMutexStop);
-    unique_lock<mutex> lock2(mMutexFinish);
-    if(mbFinished)
+    // Serialize queue cleanup with reset as well as the stop/finish transition.
+    const std::scoped_lock<std::mutex, std::mutex, std::mutex> lock(mMutexStop, mMutexFinish, mMutexNewKFs);
+    // A failed worker remains stopped until explicit finish; Release cannot
+    // resume it or strand another worker waiting for mapping to stop.
+    if(mbFinished || mWorkerFailure)
         return;
     mbStopped = false;
     mbStopRequested = false;
@@ -1055,6 +1117,7 @@ void LocalMapping::KeyFrameCulling()
 
 void LocalMapping::RequestReset()
 {
+    RethrowFailure();
     {
         unique_lock<mutex> lock(mMutexReset);
         cout << "LM: Map reset recieved" << endl;
@@ -1064,6 +1127,7 @@ void LocalMapping::RequestReset()
 
     while(1)
     {
+        RethrowFailure();
         {
             unique_lock<mutex> lock2(mMutexReset);
             if(!mbResetRequested)
@@ -1076,6 +1140,7 @@ void LocalMapping::RequestReset()
 
 void LocalMapping::RequestResetActiveMap(Map* pMap)
 {
+    RethrowFailure();
     {
         unique_lock<mutex> lock(mMutexReset);
         cout << "LM: Active map reset recieved" << endl;
@@ -1086,6 +1151,7 @@ void LocalMapping::RequestResetActiveMap(Map* pMap)
 
     while(1)
     {
+        RethrowFailure();
         {
             unique_lock<mutex> lock2(mMutexReset);
             if(!mbResetRequestedActiveMap)
@@ -1100,7 +1166,7 @@ void LocalMapping::ResetIfRequested()
 {
     bool executed_reset = false;
     {
-        unique_lock<mutex> lock(mMutexReset);
+        const std::scoped_lock<std::mutex, std::mutex> lock(mMutexReset, mMutexNewKFs);
         if(mbResetRequested)
         {
             executed_reset = true;
@@ -1158,9 +1224,9 @@ bool LocalMapping::CheckFinish()
 
 void LocalMapping::SetFinish()
 {
-    unique_lock<mutex> lock(mMutexFinish);
-    mbFinished = true;    
-    unique_lock<mutex> lock2(mMutexStop);
+    // Publish both states under the same deadlock-avoiding acquisition as Release().
+    const std::scoped_lock<std::mutex, std::mutex> lock(mMutexStop, mMutexFinish);
+    mbFinished = true;
     mbStopped = true;
 }
 
@@ -1275,29 +1341,41 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         return;
     }
 
-    // Before this line we are not changing the map
+    // Commit scale/frame propagation under map -> frame locks. Inertial
+    // optimization above already updates velocities/biases; this is not a rollback
+    // boundary. Publish failure before unlocking so Tracking cannot use this result.
     {
         unique_lock<mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
-        if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {
-            Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
-            mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
-            mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);
-        }
-
-        // Check if initialization OK
-        if (!mpAtlas->isImuInitialized())
-            for (int i = 0; i < N; i++) {
-                KeyFrame *pKF2 = vpKF[i];
-                pKF2->bImu = true;
+        try
+        {
+            FrameImuState::Guard frameIMU = mpTracker->PrepareFrameIMUUpdate(mpCurrentKeyFrame->GetMap());
+            if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {
+                Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
+                mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
+                mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame, frameIMU);
             }
-    }
 
-    mpTracker->UpdateFrameIMU(1.0,vpKF[0]->GetImuBias(),mpCurrentKeyFrame);
-    if (!mpAtlas->isImuInitialized())
-    {
-        mpAtlas->SetImuInitialized();
-        mpTracker->t0IMU = mpTracker->mCurrentFrame.mTimeStamp;
-        mpCurrentKeyFrame->bImu = true;
+            if (!mpAtlas->isImuInitialized())
+                for (int i = 0; i < N; i++) {
+                    KeyFrame *pKF2 = vpKF[i];
+                    pKF2->bImu = true;
+                }
+
+            // Keep both original updates on the same frame, including the unit
+            // scale bias propagation, instead of admitting replacement between them.
+            mpTracker->UpdateFrameIMU(1.0,vpKF[0]->GetImuBias(),mpCurrentKeyFrame,frameIMU);
+            if (!mpAtlas->isImuInitialized())
+            {
+                mpAtlas->SetImuInitialized();
+                mpTracker->t0IMU = mpTracker->mCurrentFrame.mTimeStamp;
+                mpCurrentKeyFrame->bImu = true;
+            }
+        }
+        catch(...)
+        {
+            RecordFailure(std::current_exception());
+            throw;
+        }
     }
 
     std::chrono::steady_clock::time_point t4 = std::chrono::steady_clock::now();
@@ -1474,9 +1552,18 @@ void LocalMapping::ScaleRefinement()
     std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
     if ((fabs(mScale-1.f)>0.002)||!mbMonocular)
     {
-        Sophus::SE3f Tgw(mRwg.cast<float>().transpose(),Eigen::Vector3f::Zero());
-        mpAtlas->GetCurrentMap()->ApplyScaledRotation(Tgw,mScale,true);
-        mpTracker->UpdateFrameIMU(mScale,mpCurrentKeyFrame->GetImuBias(),mpCurrentKeyFrame);
+        try
+        {
+            FrameImuState::Guard frameIMU = mpTracker->PrepareFrameIMUUpdate(mpCurrentKeyFrame->GetMap());
+            Sophus::SE3f Tgw(mRwg.cast<float>().transpose(),Eigen::Vector3f::Zero());
+            mpAtlas->GetCurrentMap()->ApplyScaledRotation(Tgw,mScale,true);
+            mpTracker->UpdateFrameIMU(mScale,mpCurrentKeyFrame->GetImuBias(),mpCurrentKeyFrame,frameIMU);
+        }
+        catch(...)
+        {
+            RecordFailure(std::current_exception());
+            throw;
+        }
     }
     std::chrono::steady_clock::time_point t3 = std::chrono::steady_clock::now();
 
