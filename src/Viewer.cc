@@ -25,8 +25,8 @@
 namespace ORB_SLAM3
 {
 
-Viewer::Viewer(System* pSystem, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Tracking *pTracking, const string &strSettingPath, Settings* settings):
-    both(false), mpSystem(pSystem), mpFrameDrawer(pFrameDrawer),mpMapDrawer(pMapDrawer), mpTracker(pTracking),
+Viewer::Viewer(System* pSystem, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Tracking *pTracking, const string &strSettingPath, Settings* settings, std::shared_ptr<spdlog::logger> logger):
+    both(false), mpSystem(pSystem), mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "viewer")), mpFrameDrawer(pFrameDrawer),mpMapDrawer(pMapDrawer), mpTracker(pTracking),
     mState()
 {
     if(settings){
@@ -40,7 +40,7 @@ Viewer::Viewer(System* pSystem, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer
 
         if(!is_correct)
         {
-            std::cerr << "**ERROR in the config file, the format is not correct**" << std::endl;
+            Log(mLogger, spdlog::level::err, "**ERROR in the config file, the format is not correct**");
             try
             {
                 throw -1;
@@ -91,7 +91,7 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Camera.width parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Camera.width parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -102,7 +102,7 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Camera.height parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Camera.height parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -119,7 +119,7 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.ViewpointX parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.ViewpointX parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -130,7 +130,7 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.ViewpointY parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.ViewpointY parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -141,7 +141,7 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.ViewpointZ parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.ViewpointZ parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -152,7 +152,7 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.ViewpointF parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.ViewpointF parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -259,7 +259,7 @@ void Viewer::RunLoop(bool &mapWindowCreated, bool &frameWindowCreated)
 
     float trackedImageScale = mpTracker->GetImageScale();
 
-    cout << "Starting the Viewer" << endl;
+    Log(mLogger, spdlog::level::info, "Starting the Viewer");
     while(1)
     {
         if (CheckFinish() || mpSystem->isShutdownRequested()) break;

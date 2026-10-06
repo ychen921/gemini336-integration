@@ -26,7 +26,7 @@ namespace ORB_SLAM3
 {
 
 
-MapDrawer::MapDrawer(Atlas* pAtlas, const string &strSettingPath, Settings* settings):mpAtlas(pAtlas)
+MapDrawer::MapDrawer(Atlas* pAtlas, const string &strSettingPath, Settings* settings, std::shared_ptr<spdlog::logger> logger):mpAtlas(pAtlas), mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "map_drawer"))
 {
     if(settings){
         newParameterLoader(settings);
@@ -37,7 +37,7 @@ MapDrawer::MapDrawer(Atlas* pAtlas, const string &strSettingPath, Settings* sett
 
         if(!is_correct)
         {
-            std::cerr << "**ERROR in the config file, the format is not correct**" << std::endl;
+            Log(mLogger, spdlog::level::err, "**ERROR in the config file, the format is not correct**");
             try
             {
                 throw -1;
@@ -70,7 +70,7 @@ bool MapDrawer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.KeyFrameSize parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.KeyFrameSize parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -81,7 +81,7 @@ bool MapDrawer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.KeyFrameLineWidth parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.KeyFrameLineWidth parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -92,7 +92,7 @@ bool MapDrawer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.GraphLineWidth parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.GraphLineWidth parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -103,7 +103,7 @@ bool MapDrawer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.PointSize parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.PointSize parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -114,7 +114,7 @@ bool MapDrawer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.CameraSize parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.CameraSize parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -125,7 +125,7 @@ bool MapDrawer::ParseViewerParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Viewer.CameraLineWidth parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "*Viewer.CameraLineWidth parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 

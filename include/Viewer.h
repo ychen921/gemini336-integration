@@ -20,6 +20,8 @@
 #ifndef VIEWER_H
 #define VIEWER_H
 
+#include "Logging.h"
+
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
 #include "Tracking.h"
@@ -42,7 +44,8 @@ class Viewer
 {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-    Viewer(System* pSystem, FrameDrawer* pFrameDrawer, MapDrawer* pMapDrawer, Tracking *pTracking, const string &strSettingPath, Settings* settings);
+    Viewer(System* pSystem, FrameDrawer* pFrameDrawer, MapDrawer* pMapDrawer, Tracking *pTracking, const string &strSettingPath, Settings* settings,
+           std::shared_ptr<spdlog::logger> logger = {});
 
     void newParameterLoader(Settings* settings);
 
@@ -73,6 +76,8 @@ private:
     bool Stop();
 
     System* mpSystem;
+    // Configured during construction, before any GUI worker starts.
+    std::shared_ptr<spdlog::logger> mLogger;
     FrameDrawer* mpFrameDrawer;
     MapDrawer* mpMapDrawer;
     Tracking* mpTracker;

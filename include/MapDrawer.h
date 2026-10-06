@@ -20,6 +20,8 @@
 #ifndef MAPDRAWER_H
 #define MAPDRAWER_H
 
+#include "Logging.h"
+
 #include"Atlas.h"
 #include"MapPoint.h"
 #include"KeyFrame.h"
@@ -37,7 +39,8 @@ class MapDrawer
 {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-    MapDrawer(Atlas* pAtlas, const string &strSettingPath, Settings* settings);
+    MapDrawer(Atlas* pAtlas, const string &strSettingPath, Settings* settings,
+              std::shared_ptr<spdlog::logger> logger = {});
 
     void newParameterLoader(Settings* settings);
 
@@ -53,6 +56,8 @@ public:
 private:
 
     bool ParseViewerParamFile(cv::FileStorage &fSettings);
+    // Configured during construction, before any GUI worker starts.
+    std::shared_ptr<spdlog::logger> mLogger;
 
     float mKeyFrameSize;
     float mKeyFrameLineWidth;
