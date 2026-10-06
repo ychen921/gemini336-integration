@@ -42,10 +42,10 @@ namespace ORB_SLAM3
 {
 
 
-Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
+Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq, std::shared_ptr<spdlog::logger> logger):
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
-    mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
+    mbReadyToInitializate(false), mpSystem(pSys), mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "tracking")), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
@@ -59,14 +59,14 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         bool b_parse_cam = ParseCamParamFile(fSettings);
         if(!b_parse_cam)
         {
-            std::cout << "*Error with the camera parameters in the config file*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Error with the camera parameters in the config file*");
         }
 
         // Load ORB parameters
         bool b_parse_orb = ParseORBParamFile(fSettings);
         if(!b_parse_orb)
         {
-            std::cout << "*Error with the ORB parameters in the config file*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Error with the ORB parameters in the config file*");
         }
 
         bool b_parse_imu = true;
@@ -75,7 +75,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
             b_parse_imu = ParseIMUParamFile(fSettings);
             if(!b_parse_imu)
             {
-                std::cout << "*Error with the IMU parameters in the config file*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Error with the IMU parameters in the config file*");
             }
 
             mnFramesToResetIMU = mMaxFrames;
@@ -83,7 +83,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
 
         if(!b_parse_cam || !b_parse_orb || !b_parse_imu)
         {
-            std::cerr << "**ERROR in the config file, the format is not correct**" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "**ERROR in the config file, the format is not correct**");
             try
             {
                 throw -1;
@@ -100,22 +100,24 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mnNumDataset = 0;
 
     vector<GeometricCamera*> vpCams = mpAtlas->GetAllCameras();
-    std::cout << "There are " << vpCams.size() << " cameras in the atlas" << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "There are " << vpCams.size() << " cameras in the atlas" << std::endl; });
     for(GeometricCamera* pCam : vpCams)
     {
-        std::cout << "Camera " << pCam->GetId();
-        if(pCam->GetType() == GeometricCamera::CAM_PINHOLE)
-        {
-            std::cout << " is pinhole" << std::endl;
-        }
-        else if(pCam->GetType() == GeometricCamera::CAM_FISHEYE)
-        {
-            std::cout << " is fisheye" << std::endl;
-        }
-        else
-        {
-            std::cout << " is unknown" << std::endl;
-        }
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) {
+            report << "Camera " << pCam->GetId();
+            if(pCam->GetType() == GeometricCamera::CAM_PINHOLE)
+            {
+                report << " is pinhole" << std::endl;
+            }
+            else if(pCam->GetType() == GeometricCamera::CAM_FISHEYE)
+            {
+                report << " is fisheye" << std::endl;
+            }
+            else
+            {
+                report << " is unknown" << std::endl;
+            }
+        });
     }
 
 #ifdef REGISTER_TIMES
@@ -272,12 +274,12 @@ void Tracking::PrintTimeStats()
     f.open("ExecMean.txt");
     f << fixed;
     //Report the mean and std of each one
-    std::cout << std::endl << " TIME STATS in ms (mean$\\pm$std)" << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << " TIME STATS in ms (mean$\\pm$std)" << std::endl; });
     f << " TIME STATS in ms (mean$\\pm$std)" << std::endl;
-    cout << "OpenCV version: " << CV_VERSION << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "OpenCV version: " << CV_VERSION << endl; });
     f << "OpenCV version: " << CV_VERSION << endl;
-    std::cout << "---------------------------" << std::endl;
-    std::cout << "Tracking" << std::setprecision(5) << std::endl << std::endl;
+    Log(mLogger, spdlog::level::info, "{}", "---------------------------");
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Tracking" << std::setprecision(5) << std::endl << std::endl; });
     f << "---------------------------" << std::endl;
     f << "Tracking" << std::setprecision(5) << std::endl << std::endl;
     double average, deviation;
@@ -285,7 +287,7 @@ void Tracking::PrintTimeStats()
     {
         average = calcAverage(vdRectStereo_ms);
         deviation = calcDeviation(vdRectStereo_ms, average);
-        std::cout << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl;
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl; });
         f << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl;
     }
 
@@ -293,20 +295,20 @@ void Tracking::PrintTimeStats()
     {
         average = calcAverage(vdResizeImage_ms);
         deviation = calcDeviation(vdResizeImage_ms, average);
-        std::cout << "Image Resize: " << average << "$\\pm$" << deviation << std::endl;
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Image Resize: " << average << "$\\pm$" << deviation << std::endl; });
         f << "Image Resize: " << average << "$\\pm$" << deviation << std::endl;
     }
 
     average = calcAverage(vdORBExtract_ms);
     deviation = calcDeviation(vdORBExtract_ms, average);
-    std::cout << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl; });
     f << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl;
 
     if(!vdStereoMatch_ms.empty())
     {
         average = calcAverage(vdStereoMatch_ms);
         deviation = calcDeviation(vdStereoMatch_ms, average);
-        std::cout << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl;
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl; });
         f << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl;
     }
 
@@ -314,101 +316,101 @@ void Tracking::PrintTimeStats()
     {
         average = calcAverage(vdIMUInteg_ms);
         deviation = calcDeviation(vdIMUInteg_ms, average);
-        std::cout << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl;
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl; });
         f << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl;
     }
 
     average = calcAverage(vdPosePred_ms);
     deviation = calcDeviation(vdPosePred_ms, average);
-    std::cout << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl; });
     f << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(vdLMTrack_ms);
     deviation = calcDeviation(vdLMTrack_ms, average);
-    std::cout << "LM Track: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LM Track: " << average << "$\\pm$" << deviation << std::endl; });
     f << "LM Track: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(vdNewKF_ms);
     deviation = calcDeviation(vdNewKF_ms, average);
-    std::cout << "New KF decision: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "New KF decision: " << average << "$\\pm$" << deviation << std::endl; });
     f << "New KF decision: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(vdTrackTotal_ms);
     deviation = calcDeviation(vdTrackTotal_ms, average);
-    std::cout << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl; });
     f << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl;
 
     // Local Mapping time stats
-    std::cout << std::endl << std::endl << std::endl;
-    std::cout << "Local Mapping" << std::endl << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << std::endl << std::endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Local Mapping" << std::endl << std::endl; });
     f << std::endl << "Local Mapping" << std::endl << std::endl;
 
     average = calcAverage(mpLocalMapper->vdKFInsert_ms);
     deviation = calcDeviation(mpLocalMapper->vdKFInsert_ms, average);
-    std::cout << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl; });
     f << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdMPCulling_ms);
     deviation = calcDeviation(mpLocalMapper->vdMPCulling_ms, average);
-    std::cout << "MP Culling: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "MP Culling: " << average << "$\\pm$" << deviation << std::endl; });
     f << "MP Culling: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdMPCreation_ms);
     deviation = calcDeviation(mpLocalMapper->vdMPCreation_ms, average);
-    std::cout << "MP Creation: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "MP Creation: " << average << "$\\pm$" << deviation << std::endl; });
     f << "MP Creation: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdLBA_ms);
     deviation = calcDeviation(mpLocalMapper->vdLBA_ms, average);
-    std::cout << "LBA: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LBA: " << average << "$\\pm$" << deviation << std::endl; });
     f << "LBA: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdKFCulling_ms);
     deviation = calcDeviation(mpLocalMapper->vdKFCulling_ms, average);
-    std::cout << "KF Culling: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "KF Culling: " << average << "$\\pm$" << deviation << std::endl; });
     f << "KF Culling: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdLMTotal_ms);
     deviation = calcDeviation(mpLocalMapper->vdLMTotal_ms, average);
-    std::cout << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl; });
     f << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl;
 
     // Local Mapping LBA complexity
-    std::cout << "---------------------------" << std::endl;
-    std::cout << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl;
+    Log(mLogger, spdlog::level::info, "{}", "---------------------------");
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl; });
     f << "---------------------------" << std::endl;
     f << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_edges);
     deviation = calcDeviation(mpLocalMapper->vnLBA_edges, average);
-    std::cout << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl; });
     f << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_KFopt);
     deviation = calcDeviation(mpLocalMapper->vnLBA_KFopt, average);
-    std::cout << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl; });
     f << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_KFfixed);
     deviation = calcDeviation(mpLocalMapper->vnLBA_KFfixed, average);
-    std::cout << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl; });
     f << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_MPs);
     deviation = calcDeviation(mpLocalMapper->vnLBA_MPs, average);
-    std::cout << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl; });
     f << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl;
 
-    std::cout << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl;
-    std::cout << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl; });
     f << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl;
     f << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl;
 
     // Map complexity
-    std::cout << "---------------------------" << std::endl;
-    std::cout << std::endl << "Map complexity" << std::endl;
-    std::cout << "KFs in map: " << mpAtlas->GetAllKeyFrames().size() << std::endl;
-    std::cout << "MPs in map: " << mpAtlas->GetAllMapPoints().size() << std::endl;
+    Log(mLogger, spdlog::level::info, "{}", "---------------------------");
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << "Map complexity" << std::endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "KFs in map: " << mpAtlas->GetAllKeyFrames().size() << std::endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "MPs in map: " << mpAtlas->GetAllMapPoints().size() << std::endl; });
     f << "---------------------------" << std::endl;
     f << std::endl << "Map complexity" << std::endl;
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
@@ -426,100 +428,100 @@ void Tracking::PrintTimeStats()
 
     f << "---------------------------" << std::endl;
     f << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl;
-    std::cout << "---------------------------" << std::endl;
-    std::cout << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl;
+    Log(mLogger, spdlog::level::info, "{}", "---------------------------");
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl; });
     average = calcAverage(mpLoopClosing->vdDataQuery_ms);
     deviation = calcDeviation(mpLoopClosing->vdDataQuery_ms, average);
     f << "Database Query: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Database Query: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Database Query: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdEstSim3_ms);
     deviation = calcDeviation(mpLoopClosing->vdEstSim3_ms, average);
     f << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdPRTotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdPRTotal_ms, average);
     f << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl; });
 
     f << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl;
-    std::cout << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl; });
     average = calcAverage(mpLoopClosing->vdLoopFusion_ms);
     deviation = calcDeviation(mpLoopClosing->vdLoopFusion_ms, average);
     f << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdLoopOptEss_ms);
     deviation = calcDeviation(mpLoopClosing->vdLoopOptEss_ms, average);
     f << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdLoopTotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdLoopTotal_ms, average);
     f << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl; });
 
     f << "Numb exec: " << mpLoopClosing->nLoop << std::endl;
-    std::cout << "Num exec: " << mpLoopClosing->nLoop << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Num exec: " << mpLoopClosing->nLoop << std::endl; });
     average = calcAverage(mpLoopClosing->vnLoopKFs);
     deviation = calcDeviation(mpLoopClosing->vnLoopKFs, average);
     f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl; });
 
     f << std::endl << "Map Merging (mean$\\pm$std)" << std::endl;
-    std::cout << std::endl << "Map Merging (mean$\\pm$std)" << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << "Map Merging (mean$\\pm$std)" << std::endl; });
     average = calcAverage(mpLoopClosing->vdMergeMaps_ms);
     deviation = calcDeviation(mpLoopClosing->vdMergeMaps_ms, average);
     f << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdWeldingBA_ms);
     deviation = calcDeviation(mpLoopClosing->vdWeldingBA_ms, average);
     f << "Welding BA: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Welding BA: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Welding BA: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdMergeOptEss_ms);
     deviation = calcDeviation(mpLoopClosing->vdMergeOptEss_ms, average);
     f << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdMergeTotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdMergeTotal_ms, average);
     f << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl; });
 
     f << "Numb exec: " << mpLoopClosing->nMerges << std::endl;
-    std::cout << "Num exec: " << mpLoopClosing->nMerges << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Num exec: " << mpLoopClosing->nMerges << std::endl; });
     average = calcAverage(mpLoopClosing->vnMergeKFs);
     deviation = calcDeviation(mpLoopClosing->vnMergeKFs, average);
     f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vnMergeMPs);
     deviation = calcDeviation(mpLoopClosing->vnMergeMPs, average);
     f << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl; });
 
     f << std::endl << "Full GBA (mean$\\pm$std)" << std::endl;
-    std::cout << std::endl << "Full GBA (mean$\\pm$std)" << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << std::endl << "Full GBA (mean$\\pm$std)" << std::endl; });
     average = calcAverage(mpLoopClosing->vdGBA_ms);
     deviation = calcDeviation(mpLoopClosing->vdGBA_ms, average);
     f << "GBA: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "GBA: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "GBA: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdUpdateMap_ms);
     deviation = calcDeviation(mpLoopClosing->vdUpdateMap_ms, average);
     f << "Map Update: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Map Update: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Map Update: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vdFGBATotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdFGBATotal_ms, average);
     f << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl; });
 
     f << "Numb exec: " << mpLoopClosing->nFGBA_exec << std::endl;
-    std::cout << "Num exec: " << mpLoopClosing->nFGBA_exec << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Num exec: " << mpLoopClosing->nFGBA_exec << std::endl; });
     f << "Numb abort: " << mpLoopClosing->nFGBA_abort << std::endl;
-    std::cout << "Num abort: " << mpLoopClosing->nFGBA_abort << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Num abort: " << mpLoopClosing->nFGBA_abort << std::endl; });
     average = calcAverage(mpLoopClosing->vnGBAKFs);
     deviation = calcDeviation(mpLoopClosing->vnGBAKFs, average);
     f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl; });
     average = calcAverage(mpLoopClosing->vnGBAMPs);
     deviation = calcDeviation(mpLoopClosing->vnGBAMPs, average);
     f << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::setprecision(5) << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl; });
 
     f.close();
 
@@ -620,7 +622,7 @@ void Tracking::newParameterLoader(Settings *settings) {
 bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
 {
     mDistCoef = cv::Mat::zeros(4,1,CV_32F);
-    cout << endl << "Camera Parameters: " << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << endl << "Camera Parameters: " << endl; });
     bool b_miss_params = false;
 
     string sCameraName = fSettings["Camera.type"];
@@ -637,7 +639,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.fx parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.fx parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -648,7 +650,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.fy parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.fy parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -659,7 +661,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.cx parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.cx parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -670,7 +672,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.cy parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.cy parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -682,7 +684,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.k1 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.k1 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -693,7 +695,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.k2 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.k2 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -704,7 +706,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.p1 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.p1 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -715,7 +717,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.p2 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.p2 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -752,21 +754,21 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
 
         mpCamera = mpAtlas->AddCamera(mpCamera);
 
-        std::cout << "- Camera: Pinhole" << std::endl;
-        std::cout << "- Image scale: " << mImageScale << std::endl;
-        std::cout << "- fx: " << fx << std::endl;
-        std::cout << "- fy: " << fy << std::endl;
-        std::cout << "- cx: " << cx << std::endl;
-        std::cout << "- cy: " << cy << std::endl;
-        std::cout << "- k1: " << mDistCoef.at<float>(0) << std::endl;
-        std::cout << "- k2: " << mDistCoef.at<float>(1) << std::endl;
+        Log(mLogger, spdlog::level::info, "{}", "- Camera: Pinhole");
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Image scale: " << mImageScale << std::endl; });
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- fx: " << fx << std::endl; });
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- fy: " << fy << std::endl; });
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- cx: " << cx << std::endl; });
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- cy: " << cy << std::endl; });
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k1: " << mDistCoef.at<float>(0) << std::endl; });
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k2: " << mDistCoef.at<float>(1) << std::endl; });
 
 
-        std::cout << "- p1: " << mDistCoef.at<float>(2) << std::endl;
-        std::cout << "- p2: " << mDistCoef.at<float>(3) << std::endl;
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- p1: " << mDistCoef.at<float>(2) << std::endl; });
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- p2: " << mDistCoef.at<float>(3) << std::endl; });
 
         if(mDistCoef.rows==5)
-            std::cout << "- k3: " << mDistCoef.at<float>(4) << std::endl;
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k3: " << mDistCoef.at<float>(4) << std::endl; });
 
         mK = cv::Mat::eye(3,3,CV_32F);
         mK.at<float>(0,0) = fx;
@@ -794,7 +796,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.fx parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.fx parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
         node = fSettings["Camera.fy"];
@@ -804,7 +806,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.fy parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.fy parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -815,7 +817,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.cx parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.cx parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -826,7 +828,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.cy parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.cy parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -838,7 +840,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.k1 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.k1 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
         node = fSettings["Camera.k2"];
@@ -848,7 +850,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.k2 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.k2 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -859,7 +861,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.k3 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.k3 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -870,7 +872,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.k4 parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.k4 parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -894,16 +896,16 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             vector<float> vCamCalib{fx,fy,cx,cy,k1,k2,k3,k4};
             mpCamera = new KannalaBrandt8(vCamCalib);
             mpCamera = mpAtlas->AddCamera(mpCamera);
-            std::cout << "- Camera: Fisheye" << std::endl;
-            std::cout << "- Image scale: " << mImageScale << std::endl;
-            std::cout << "- fx: " << fx << std::endl;
-            std::cout << "- fy: " << fy << std::endl;
-            std::cout << "- cx: " << cx << std::endl;
-            std::cout << "- cy: " << cy << std::endl;
-            std::cout << "- k1: " << k1 << std::endl;
-            std::cout << "- k2: " << k2 << std::endl;
-            std::cout << "- k3: " << k3 << std::endl;
-            std::cout << "- k4: " << k4 << std::endl;
+            Log(mLogger, spdlog::level::info, "{}", "- Camera: Fisheye");
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Image scale: " << mImageScale << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- fx: " << fx << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- fy: " << fy << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- cx: " << cx << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- cy: " << cy << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k1: " << k1 << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k2: " << k2 << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k3: " << k3 << std::endl; });
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k4: " << k4 << std::endl; });
 
             mK = cv::Mat::eye(3,3,CV_32F);
             mK.at<float>(0,0) = fx;
@@ -928,7 +930,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.fx parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.fx parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
             node = fSettings["Camera2.fy"];
@@ -938,7 +940,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.fy parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.fy parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
 
@@ -949,7 +951,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.cx parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.cx parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
 
@@ -960,7 +962,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.cy parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.cy parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
 
@@ -972,7 +974,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.k1 parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.k1 parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
             node = fSettings["Camera2.k2"];
@@ -982,7 +984,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.k2 parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.k2 parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
 
@@ -993,7 +995,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.k3 parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.k3 parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
 
@@ -1004,7 +1006,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cerr << "*Camera2.k4 parameter doesn't exist or is not a real number*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Camera2.k4 parameter doesn't exist or is not a real number*");
                 b_miss_params = true;
             }
 
@@ -1022,7 +1024,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cout << "WARNING: Camera.lappingBegin not correctly defined" << std::endl;
+                Log(mLogger, spdlog::level::info, "{}", "WARNING: Camera.lappingBegin not correctly defined");
             }
             node = fSettings["Camera.lappingEnd"];
             if(!node.empty() && node.isInt())
@@ -1031,7 +1033,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cout << "WARNING: Camera.lappingEnd not correctly defined" << std::endl;
+                Log(mLogger, spdlog::level::info, "{}", "WARNING: Camera.lappingEnd not correctly defined");
             }
             node = fSettings["Camera2.lappingBegin"];
             if(!node.empty() && node.isInt())
@@ -1040,7 +1042,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cout << "WARNING: Camera2.lappingBegin not correctly defined" << std::endl;
+                Log(mLogger, spdlog::level::info, "{}", "WARNING: Camera2.lappingBegin not correctly defined");
             }
             node = fSettings["Camera2.lappingEnd"];
             if(!node.empty() && node.isInt())
@@ -1049,7 +1051,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             }
             else
             {
-                std::cout << "WARNING: Camera2.lappingEnd not correctly defined" << std::endl;
+                Log(mLogger, spdlog::level::info, "{}", "WARNING: Camera2.lappingEnd not correctly defined");
             }
 
             node = fSettings["Tlr"];
@@ -1059,13 +1061,13 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
                 cvTlr = node.mat();
                 if(cvTlr.rows != 3 || cvTlr.cols != 4)
                 {
-                    std::cerr << "*Tlr matrix have to be a 3x4 transformation matrix*" << std::endl;
+                    Log(mLogger, spdlog::level::err, "{}", "*Tlr matrix have to be a 3x4 transformation matrix*");
                     b_miss_params = true;
                 }
             }
             else
             {
-                std::cerr << "*Tlr matrix doesn't exist*" << std::endl;
+                Log(mLogger, spdlog::level::err, "{}", "*Tlr matrix doesn't exist*");
                 b_miss_params = true;
             }
 
@@ -1099,23 +1101,23 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
                 static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[0] = rightLappingBegin;
                 static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[1] = rightLappingEnd;
 
-                std::cout << "- Camera1 Lapping: " << leftLappingBegin << ", " << leftLappingEnd << std::endl;
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Camera1 Lapping: " << leftLappingBegin << ", " << leftLappingEnd << std::endl; });
 
-                std::cout << std::endl << "Camera2 Parameters:" << std::endl;
-                std::cout << "- Camera: Fisheye" << std::endl;
-                std::cout << "- Image scale: " << mImageScale << std::endl;
-                std::cout << "- fx: " << fx << std::endl;
-                std::cout << "- fy: " << fy << std::endl;
-                std::cout << "- cx: " << cx << std::endl;
-                std::cout << "- cy: " << cy << std::endl;
-                std::cout << "- k1: " << k1 << std::endl;
-                std::cout << "- k2: " << k2 << std::endl;
-                std::cout << "- k3: " << k3 << std::endl;
-                std::cout << "- k4: " << k4 << std::endl;
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << std::endl << "Camera2 Parameters:" << std::endl; });
+                Log(mLogger, spdlog::level::info, "{}", "- Camera: Fisheye");
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Image scale: " << mImageScale << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- fx: " << fx << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- fy: " << fy << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- cx: " << cx << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- cy: " << cy << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k1: " << k1 << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k2: " << k2 << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k3: " << k3 << std::endl; });
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- k4: " << k4 << std::endl; });
 
-                std::cout << "- mTlr: \n" << cvTlr << std::endl;
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- mTlr: \n" << cvTlr << std::endl; });
 
-                std::cout << "- Camera2 Lapping: " << rightLappingBegin << ", " << rightLappingEnd << std::endl;
+                LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Camera2 Lapping: " << rightLappingBegin << ", " << rightLappingEnd << std::endl; });
             }
         }
 
@@ -1127,8 +1129,8 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*Not Supported Camera Sensor*" << std::endl;
-        std::cerr << "Check an example configuration file with the desired sensor" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*Not Supported Camera Sensor*");
+        Log(mLogger, spdlog::level::err, "{}", "Check an example configuration file with the desired sensor");
     }
 
     if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD )
@@ -1144,7 +1146,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*Camera.bf parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Camera.bf parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -1158,16 +1160,16 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
     mMinFrames = 0;
     mMaxFrames = fps;
 
-    cout << "- fps: " << fps << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- fps: " << fps << endl; });
 
 
     int nRGB = fSettings["Camera.RGB"];
     mbRGB = nRGB;
 
     if(mbRGB)
-        cout << "- color order: RGB (ignored if grayscale)" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "- color order: RGB (ignored if grayscale)");
     else
-        cout << "- color order: BGR (ignored if grayscale)" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "- color order: BGR (ignored if grayscale)");
 
     if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD)
     {
@@ -1177,11 +1179,11 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         {
             mThDepth = node.real();
             mThDepth = mbf*mThDepth/fx;
-            cout << endl << "Depth Threshold (Close/Far Points): " << mThDepth << endl;
+            LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << endl << "Depth Threshold (Close/Far Points): " << mThDepth << endl; });
         }
         else
         {
-            std::cerr << "*ThDepth parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*ThDepth parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -1201,7 +1203,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         }
         else
         {
-            std::cerr << "*DepthMapFactor parameter doesn't exist or is not a real number*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*DepthMapFactor parameter doesn't exist or is not a real number*");
             b_miss_params = true;
         }
 
@@ -1228,7 +1230,7 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*ORBextractor.nFeatures parameter doesn't exist or is not an integer*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*ORBextractor.nFeatures parameter doesn't exist or is not an integer*");
         b_miss_params = true;
     }
 
@@ -1239,7 +1241,7 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*ORBextractor.scaleFactor parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*ORBextractor.scaleFactor parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -1250,7 +1252,7 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*ORBextractor.nLevels parameter doesn't exist or is not an integer*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*ORBextractor.nLevels parameter doesn't exist or is not an integer*");
         b_miss_params = true;
     }
 
@@ -1261,7 +1263,7 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*ORBextractor.iniThFAST parameter doesn't exist or is not an integer*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*ORBextractor.iniThFAST parameter doesn't exist or is not an integer*");
         b_miss_params = true;
     }
 
@@ -1272,7 +1274,7 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*ORBextractor.minThFAST parameter doesn't exist or is not an integer*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*ORBextractor.minThFAST parameter doesn't exist or is not an integer*");
         b_miss_params = true;
     }
 
@@ -1289,12 +1291,12 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
-    cout << endl << "ORB Extractor Parameters: " << endl;
-    cout << "- Number of Features: " << nFeatures << endl;
-    cout << "- Scale Levels: " << nLevels << endl;
-    cout << "- Scale Factor: " << fScaleFactor << endl;
-    cout << "- Initial Fast Threshold: " << fIniThFAST << endl;
-    cout << "- Minimum Fast Threshold: " << fMinThFAST << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << endl << "ORB Extractor Parameters: " << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Number of Features: " << nFeatures << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Scale Levels: " << nLevels << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Scale Factor: " << fScaleFactor << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Initial Fast Threshold: " << fIniThFAST << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "- Minimum Fast Threshold: " << fMinThFAST << endl; });
 
     return true;
 }
@@ -1310,17 +1312,17 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
         cvTbc = node.mat();
         if(cvTbc.rows != 4 || cvTbc.cols != 4)
         {
-            std::cerr << "*Tbc matrix have to be a 4x4 transformation matrix*" << std::endl;
+            Log(mLogger, spdlog::level::err, "{}", "*Tbc matrix have to be a 4x4 transformation matrix*");
             b_miss_params = true;
         }
     }
     else
     {
-        std::cerr << "*Tbc matrix doesn't exist*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*Tbc matrix doesn't exist*");
         b_miss_params = true;
     }
-    cout << endl;
-    cout << "Left camera to Imu Transform (Tbc): " << endl << cvTbc << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "Left camera to Imu Transform (Tbc): " << endl << cvTbc << endl; });
     Eigen::Matrix<float,4,4,Eigen::RowMajor> eigTbc(cvTbc.ptr<float>(0));
     Sophus::SE3f Tbc(eigTbc);
 
@@ -1332,7 +1334,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
 
     if(!mInsertKFsLost)
-        cout << "Do not insert keyframes when lost visual tracking " << endl;
+        Log(mLogger, spdlog::level::info, "{}", "Do not insert keyframes when lost visual tracking ");
 
 
 
@@ -1346,7 +1348,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*IMU.Frequency parameter doesn't exist or is not an integer*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*IMU.Frequency parameter doesn't exist or is not an integer*");
         b_miss_params = true;
     }
 
@@ -1357,7 +1359,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*IMU.NoiseGyro parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*IMU.NoiseGyro parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -1368,7 +1370,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*IMU.NoiseAcc parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*IMU.NoiseAcc parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -1379,7 +1381,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*IMU.GyroWalk parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*IMU.GyroWalk parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -1390,7 +1392,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
     else
     {
-        std::cerr << "*IMU.AccWalk parameter doesn't exist or is not a real number*" << std::endl;
+        Log(mLogger, spdlog::level::err, "{}", "*IMU.AccWalk parameter doesn't exist or is not a real number*");
         b_miss_params = true;
     }
 
@@ -1402,7 +1404,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
 
     if(mFastInit)
-        cout << "Fast IMU initialization. Acceleration is not checked \n";
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "Fast IMU initialization. Acceleration is not checked \n"; });
 
     if(b_miss_params)
     {
@@ -1410,12 +1412,12 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
 
     const float sf = sqrt(mImuFreq);
-    cout << endl;
-    cout << "IMU frequency: " << mImuFreq << " Hz" << endl;
-    cout << "IMU gyro noise: " << Ng << " rad/s/sqrt(Hz)" << endl;
-    cout << "IMU gyro walk: " << Ngw << " rad/s^2/sqrt(Hz)" << endl;
-    cout << "IMU accelerometer noise: " << Na << " m/s^2/sqrt(Hz)" << endl;
-    cout << "IMU accelerometer walk: " << Naw << " m/s^3/sqrt(Hz)" << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "IMU frequency: " << mImuFreq << " Hz" << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "IMU gyro noise: " << Ng << " rad/s/sqrt(Hz)" << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "IMU gyro walk: " << Ngw << " rad/s^2/sqrt(Hz)" << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "IMU accelerometer noise: " << Na << " m/s^2/sqrt(Hz)" << endl; });
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "IMU accelerometer walk: " << Naw << " m/s^3/sqrt(Hz)" << endl; });
 
     mpImuCalib = new IMU::Calib(Tbc,Ng*sf,Na*sf,Ngw/sf,Naw/sf);
 
@@ -1660,7 +1662,7 @@ bool Tracking::PreintegrateIMU()
 
     if(!mCurrentFrame.mpPrevFrame)
     {
-        Verbose::PrintMess("non prev frame ", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::debug, "{}", "non prev frame ");
         mCurrentFrame.setIntegrated();
         return true;
     }
@@ -1671,7 +1673,7 @@ bool Tracking::PreintegrateIMU()
         mvImuFromLastFrame.reserve(mlQueueImuData.size());
         if(mlQueueImuData.empty())
         {
-            Verbose::PrintMess("Not IMU data in mlQueueImuData!!", Verbose::VERBOSITY_NORMAL);
+            Log(mLogger, spdlog::level::debug, "{}", "Not IMU data in mlQueueImuData!!");
             mCurrentFrame.setIntegrated();
             return false;
         }
@@ -1685,7 +1687,6 @@ bool Tracking::PreintegrateIMU()
             if(!mlQueueImuData.empty())
             {
                 IMU::Point* m = &mlQueueImuData.front();
-                cout.precision(17);
                 if(m->t<mCurrentFrame.mpPrevFrame->mTimeStamp-mImuPer)
                 {
                     mlQueueImuData.pop_front();
@@ -1714,7 +1715,7 @@ bool Tracking::PreintegrateIMU()
     // One sample cannot define an integration interval. Publish unavailability
     // instead of leaving UpdateFrameIMU waiting for work that already returned.
     if(mvImuFromLastFrame.size()<2){
-        cout << "Empty IMU measurements vector!!!\n";
+        LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "Empty IMU measurements vector!!!\n"; });
         return false;
     }
     const int n = static_cast<int>(mvImuFromLastFrame.size())-1;
@@ -1780,7 +1781,7 @@ bool Tracking::PredictStateIMU()
 {
     if(!mCurrentFrame.mpPrevFrame)
     {
-        Verbose::PrintMess("No last frame", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::debug, "{}", "No last frame");
         return false;
     }
 
@@ -1821,7 +1822,7 @@ bool Tracking::PredictStateIMU()
         return true;
     }
     else
-        cout << "not IMU prediction!!" << endl;
+        Log(mLogger, spdlog::level::debug, "{}", "not IMU prediction!!");
 
     return false;
 }
@@ -1840,7 +1841,7 @@ void Tracking::Track()
 
     if (bStepByStep)
     {
-        std::cout << "Tracking: Waiting to the next step" << std::endl;
+        Log(mLogger, spdlog::level::info, "{}", "Tracking: Waiting to the next step");
         // Shutdown releases this pause so an already admitted frame can finish;
         // it does not cancel tracking or return a partially processed frame.
         while(!mbStep && bStepByStep && !mpSystem->isShutdownRequested())
@@ -1853,7 +1854,7 @@ void Tracking::Track()
     {
         frameIMU.Invalidate();
         frameIMU.Unlock();
-        cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
+        Log(mLogger, spdlog::level::warn, "{}", "TRACK: Reset map because local mapper set the bad imu flag ");
         mpSystem->ResetActiveMap();
         return;
     }
@@ -1870,7 +1871,7 @@ void Tracking::Track()
         {
             frameIMU.Invalidate();
             frameIMU.Unlock();
-            cerr << "ERROR: Frame with a timestamp older than previous frame detected!" << endl;
+            Log(mLogger, spdlog::level::err, "{}", "ERROR: Frame with a timestamp older than previous frame detected!");
             unique_lock<mutex> lock(mMutexImuQueue);
             mlQueueImuData.clear();
             CreateMapInAtlas();
@@ -1887,7 +1888,7 @@ void Tracking::Track()
 
                 if(mpAtlas->isImuInitialized())
                 {
-                    cout << "Timestamp jump detected. State set to LOST. Reseting IMU integration..." << endl;
+                    Log(mLogger, spdlog::level::warn, "{}", "Timestamp jump detected. State set to LOST. Reseting IMU integration...");
                     if(!pCurrentMap->GetIniertialBA2())
                     {
                         mpSystem->ResetActiveMap();
@@ -1899,7 +1900,7 @@ void Tracking::Track()
                 }
                 else
                 {
-                    cout << "Timestamp jump detected, before IMU initialization. Reseting..." << endl;
+                    Log(mLogger, spdlog::level::warn, "{}", "Timestamp jump detected, before IMU initialization. Reseting...");
                     mpSystem->ResetActiveMap();
                 }
                 return;
@@ -2017,12 +2018,12 @@ void Tracking::Track()
 
                 if((!mbVelocity && !pCurrentMap->isImuInitialized()) || mCurrentFrame.mnId<mnLastRelocFrameId+2)
                 {
-                    Verbose::PrintMess("TRACK: Track with respect to the reference KF ", Verbose::VERBOSITY_DEBUG);
+                    Log(mLogger, spdlog::level::debug, "{}", "TRACK: Track with respect to the reference KF ");
                     bOK = TrackReferenceKeyFrame();
                 }
                 else
                 {
-                    Verbose::PrintMess("TRACK: Track with motion model", Verbose::VERBOSITY_DEBUG);
+                    Log(mLogger, spdlog::level::debug, "{}", "TRACK: Track with motion model");
                     bOK = TrackWithMotionModel();
                     if(!bOK)
                         bOK = TrackReferenceKeyFrame();
@@ -2053,7 +2054,7 @@ void Tracking::Track()
 
                 if (mState == RECENTLY_LOST)
                 {
-                    Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
+                    Log(mLogger, spdlog::level::warn, "{}", "Lost for a short time");
 
                     bOK = true;
                     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
@@ -2066,7 +2067,7 @@ void Tracking::Track()
                         if (mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
                         {
                             mState = LOST;
-                            Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
+                            Log(mLogger, spdlog::level::warn, "{}", "Track Lost...");
                             bOK=false;
                         }
                     }
@@ -2079,7 +2080,7 @@ void Tracking::Track()
                         if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
                         {
                             mState = LOST;
-                            Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
+                            Log(mLogger, spdlog::level::warn, "{}", "Track Lost...");
                             bOK=false;
                         }
                     }
@@ -2087,19 +2088,19 @@ void Tracking::Track()
                 else if (mState == LOST)
                 {
 
-                    Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
+                    Log(mLogger, spdlog::level::debug, "{}", "A new map is started...");
 
                     if (pCurrentMap->KeyFramesInMap()<10)
                     {
                         mpSystem->ResetActiveMap();
-                        Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
+                        Log(mLogger, spdlog::level::debug, "{}", "Reseting current map...");
                     }else
                         CreateMapInAtlas();
 
                     if(mpLastKeyFrame)
                         mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
 
-                    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+                    Log(mLogger, spdlog::level::debug, "{}", "done");
 
                     return;
                 }
@@ -2112,7 +2113,7 @@ void Tracking::Track()
             if(mState==LOST)
             {
                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
-                    Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
+                    Log(mLogger, spdlog::level::warn, "{}", "IMU. State LOST");
                 bOK = Relocalization();
             }
             else
@@ -2201,7 +2202,7 @@ void Tracking::Track()
 
             }
             if(!bOK)
-                cout << "Fail to track local map!" << endl;
+                Log(mLogger, spdlog::level::debug, "{}", "Fail to track local map!");
         }
         else
         {
@@ -2218,10 +2219,10 @@ void Tracking::Track()
         {
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             {
-                Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
+                Log(mLogger, spdlog::level::debug, "{}", "Track lost for less than one second...");
                 if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
                 {
-                    cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                    Log(mLogger, spdlog::level::warn, "{}", "IMU is not or recently initialized. Reseting active map...");
                     mpSystem->ResetActiveMap();
                 }
 
@@ -2241,7 +2242,7 @@ void Tracking::Track()
            (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
         {
             // TODO check this situation
-            Verbose::PrintMess("Saving pointer to frame. imu needs reset...", Verbose::VERBOSITY_NORMAL);
+            Log(mLogger, spdlog::level::debug, "{}", "Saving pointer to frame. imu needs reset...");
             Frame* pF = new Frame(mCurrentFrame);
             pF->mpPrevFrame = new Frame(mLastFrame);
 
@@ -2255,7 +2256,7 @@ void Tracking::Track()
             {
                 if(mCurrentFrame.mnId==(mnLastRelocFrameId+mnFramesToResetIMU))
                 {
-                    cout << "RESETING FRAME!!!" << endl;
+                    Log(mLogger, spdlog::level::debug, "{}", "RESETING FRAME!!!");
                     ResetFrameIMU();
                 }
                 else if(mCurrentFrame.mnId>(mnLastRelocFrameId+30))
@@ -2351,7 +2352,7 @@ void Tracking::Track()
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                 if (!pCurrentMap->isImuInitialized())
                 {
-                    Verbose::PrintMess("Track lost before IMU initialisation, reseting...", Verbose::VERBOSITY_QUIET);
+                    Log(mLogger, spdlog::level::warn, "{}", "Track lost before IMU initialisation, reseting...");
                     mpSystem->ResetActiveMap();
                     return;
                 }
@@ -2415,13 +2416,13 @@ void Tracking::StereoInitialization()
             if (!mCurrentFrame.mpImuPreintegrated || !mLastFrame.mpImuPreintegrated ||
                 !mCurrentFrame.mpImuPreintegratedFrame || !mLastFrame.mpImuPreintegratedFrame)
             {
-                cout << "not IMU meas" << endl;
+                Log(mLogger, spdlog::level::debug, "{}", "not IMU meas");
                 return;
             }
 
             if (!mFastInit && (mCurrentFrame.mpImuPreintegratedFrame->avgA-mLastFrame.mpImuPreintegratedFrame->avgA).norm()<0.5)
             {
-                cout << "not enough acceleration" << endl;
+                Log(mLogger, spdlog::level::debug, "{}", "not enough acceleration");
                 return;
             }
 
@@ -2493,7 +2494,7 @@ void Tracking::StereoInitialization()
             }
         }
 
-        Verbose::PrintMess("New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points", Verbose::VERBOSITY_QUIET);
+        LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points"; });
 
         //cout << "Active map: " << mpAtlas->GetCurrentMap()->GetId() << endl;
 
@@ -2651,7 +2652,7 @@ void Tracking::CreateInitialMapMonocular()
     sMPs = pKFini->GetMapPoints();
 
     // Bundle Adjustment
-    Verbose::PrintMess("New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points", Verbose::VERBOSITY_QUIET);
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points"; });
     Optimizer::GlobalBundleAdjustemnt(mpAtlas->GetCurrentMap(),20);
 
     float medianDepth = pKFini->ComputeSceneMedianDepth(2);
@@ -2663,7 +2664,7 @@ void Tracking::CreateInitialMapMonocular()
 
     if(medianDepth<0 || pKFcur->TrackedMapPoints(1)<50) // TODO Check, originally 100 tracks
     {
-        Verbose::PrintMess("Wrong initialization, reseting...", Verbose::VERBOSITY_QUIET);
+        Log(mLogger, spdlog::level::warn, "{}", "Wrong initialization, reseting...");
         mpSystem->ResetActiveMap();
         return;
     }
@@ -2752,7 +2753,7 @@ void Tracking::CreateMapInAtlas()
     // Restart the variable with information about the last KF
     mbVelocity = false;
     //mnLastRelocFrameId = mnLastInitFrameId; // The last relocation KF_id is the current id, because it is the new starting point for new map
-    Verbose::PrintMess("First frame id in map: " + to_string(mnLastInitFrameId+1), Verbose::VERBOSITY_NORMAL);
+    LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "First frame id in map: " + to_string(mnLastInitFrameId+1); });
     mbVO = false; // Init value for know if there are enough MapPoints in the last KF
     if(mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR)
     {
@@ -2810,7 +2811,7 @@ bool Tracking::TrackReferenceKeyFrame()
 
     if(nmatches<15)
     {
-        cout << "TRACK_REF_KF: Less than 15 matches!!\n";
+        LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "TRACK_REF_KF: Less than 15 matches!!\n"; });
         return false;
     }
 
@@ -2967,17 +2968,17 @@ bool Tracking::TrackWithMotionModel()
     // If few matches, uses a wider window search
     if(nmatches<20)
     {
-        Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::debug, "{}", "Not enough matches, wider window search!!");
         fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
 
         nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
-        Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
+        LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "Matches with wider search: " + to_string(nmatches); });
 
     }
 
     if(nmatches<20)
     {
-        Verbose::PrintMess("Not enough matches!!", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::debug, "{}", "Not enough matches!!");
         if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             return true;
         else
@@ -3052,7 +3053,7 @@ bool Tracking::TrackLocalMap()
     {
         if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
         {
-            Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
+            Log(mLogger, spdlog::level::debug, "{}", "TLM: PoseOptimization ");
             Optimizer::PoseOptimization(&mCurrentFrame);
         }
         else
@@ -3060,12 +3061,12 @@ bool Tracking::TrackLocalMap()
             // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
             if(!mbMapUpdated) //  && (mnMatchesInliers>30))
             {
-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
+                Log(mLogger, spdlog::level::debug, "{}", "TLM: PoseInertialOptimizationLastFrame ");
                 inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
             }
             else
             {
-                Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
+                Log(mLogger, spdlog::level::debug, "{}", "TLM: PoseInertialOptimizationLastKeyFrame ");
                 inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
             }
         }
@@ -3315,7 +3316,7 @@ void Tracking::CreateNewKeyFrame()
         mpLastKeyFrame->mNextKF = pKF;
     }
     else
-        Verbose::PrintMess("No last KF in KF creation!!", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::debug, "{}", "No last KF in KF creation!!");
 
     // Reset preintegration from last KF (Create new object)
     if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
@@ -3687,7 +3688,7 @@ void Tracking::UpdateLocalKeyFrames()
 
 bool Tracking::Relocalization()
 {
-    Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::debug, "{}", "Starting relocalization");
     // Compute Bag of Words Vector
     mCurrentFrame.ComputeBoW();
 
@@ -3696,7 +3697,7 @@ bool Tracking::Relocalization()
     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
 
     if(vpCandidateKFs.empty()) {
-        Verbose::PrintMess("There are not candidates", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::debug, "{}", "There are not candidates");
         return false;
     }
 
@@ -3849,7 +3850,7 @@ bool Tracking::Relocalization()
     else
     {
         mnLastRelocFrameId = mCurrentFrame.mnId;
-        cout << "Relocalized!!" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "Relocalized!!");
         return true;
     }
 
@@ -3862,7 +3863,7 @@ void Tracking::Reset(bool bLocMap)
         frameIMU.Invalidate();
     }
     // Never retain the frame guard while asking mapping/loop workers to reset.
-    Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "System Reseting");
 
     if(mpViewer)
     {
@@ -3878,23 +3879,23 @@ void Tracking::Reset(bool bLocMap)
     // Reset Local Mapping
     if (!bLocMap)
     {
-        Verbose::PrintMess("Reseting Local Mapper...", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::info, "{}", "Reseting Local Mapper...");
         mpLocalMapper->RequestReset();
-        Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::debug, "{}", "done");
     }
 
 
     // Reset Loop Closing
-    Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Reseting Loop Closing...");
     mpLoopClosing->RequestReset();
-    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::debug, "{}", "done");
 
     FrameImuState::Guard frameIMU = mFrameIMU.Lock();
 
     // Clear BoW Database
-    Verbose::PrintMess("Reseting Database...", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Reseting Database...");
     mpKeyFrameDB->clear();
-    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::debug, "{}", "done");
 
     // Clear Map (this erase MapPoints and KeyFrames)
     mpAtlas->clearAtlas();
@@ -3924,7 +3925,7 @@ void Tracking::Reset(bool bLocMap)
     if(mpViewer)
         mpViewer->Release();
 
-    Verbose::PrintMess("   End reseting! ", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "   End reseting! ");
 }
 
 void Tracking::ResetActiveMap(bool bLocMap)
@@ -3933,7 +3934,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
         FrameImuState::Guard frameIMU = mFrameIMU.Lock();
         frameIMU.Invalidate();
     }
-    Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Active map Reseting");
     if(mpViewer)
     {
         mpViewer->RequestStop();
@@ -3949,22 +3950,22 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
     if (!bLocMap)
     {
-        Verbose::PrintMess("Reseting Local Mapper...", Verbose::VERBOSITY_VERY_VERBOSE);
+        Log(mLogger, spdlog::level::info, "{}", "Reseting Local Mapper...");
         mpLocalMapper->RequestResetActiveMap(pMap);
-        Verbose::PrintMess("done", Verbose::VERBOSITY_VERY_VERBOSE);
+        Log(mLogger, spdlog::level::trace, "{}", "done");
     }
 
     // Reset Loop Closing
-    Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Reseting Loop Closing...");
     mpLoopClosing->RequestResetActiveMap(pMap);
-    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::debug, "{}", "done");
 
     FrameImuState::Guard frameIMU = mFrameIMU.Lock();
 
     // Clear BoW Database
-    Verbose::PrintMess("Reseting Database", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Reseting Database");
     mpKeyFrameDB->clearMap(pMap); // Only clear the active map references
-    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::debug, "{}", "done");
 
     // Clear Map (this erase MapPoints and KeyFrames)
     mpAtlas->clearMap();
@@ -3981,7 +3982,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
     list<bool> lbLost;
     // lbLost.reserve(mlbLost.size());
     unsigned int index = mnFirstFrameId;
-    cout << "mnFirstFrameId = " << mnFirstFrameId << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "mnFirstFrameId = " << mnFirstFrameId << endl; });
     for(Map* pMap : mpAtlas->GetAllMaps())
     {
         if(pMap->GetAllKeyFrames().size() > 0)
@@ -3993,7 +3994,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
     //cout << "First Frame id: " << index << endl;
     int num_lost = 0;
-    cout << "mnInitialFrameId = " << mnInitialFrameId << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "mnInitialFrameId = " << mnInitialFrameId << endl; });
 
     for(list<bool>::iterator ilbL = mlbLost.begin(); ilbL != mlbLost.end(); ilbL++)
     {
@@ -4007,7 +4008,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
         index++;
     }
-    cout << num_lost << " Frames set to lost" << endl;
+    LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << num_lost << " Frames set to lost" << endl; });
 
     mlbLost = lbLost;
 
@@ -4025,7 +4026,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
     if(mpViewer)
         mpViewer->Release();
 
-    Verbose::PrintMess("   End reseting! ", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "   End reseting! ");
 }
 
 vector<MapPoint*> Tracking::GetLocalMapMPS()
@@ -4212,7 +4213,7 @@ bool Tracking::Stop()
     if(mbStopRequested && !mbNotStop)
     {
         mbStopped = true;
-        cout << "Tracking STOP" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "Tracking STOP");
         return true;
     }
 

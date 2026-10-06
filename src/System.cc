@@ -205,11 +205,11 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     //(it will live in the main thread of execution, the one that called this constructor)
     Log(mLogger, spdlog::level::info, "Seq. Name: {}", strSequence);
     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
-                             mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence);
+                             mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence, GetLogger("tracking"));
 
     // Construct/configure workers before launching their threads.
     mpLocalMapper = new LocalMapping(this, mpAtlas, mSensor==MONOCULAR || mSensor==IMU_MONOCULAR,
-                                     mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO || mSensor==IMU_RGBD, strSequence);
+                                     mSensor==IMU_MONOCULAR || mSensor==IMU_STEREO || mSensor==IMU_RGBD, strSequence, GetLogger("local_mapping"));
     mptLocalMapping = nullptr;
     mptLoopClosing = nullptr;
     mptViewer = nullptr;
@@ -229,7 +229,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     // Construct Loop Closing; pointer wiring follows before launch.
     // mSensor!=MONOCULAR && mSensor!=IMU_MONOCULAR
     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, activeLC,
-        [this]() { return isShutdownRequested(); });
+        [this]() { return isShutdownRequested(); }, GetLogger("loop_closing"));
 
     //Set pointers between threads
     mpTracker->SetLocalMapper(mpLocalMapper);

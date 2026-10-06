@@ -20,6 +20,8 @@
 #ifndef LOOPCLOSING_H
 #define LOOPCLOSING_H
 
+#include "Logging.h"
+
 #include "KeyFrame.h"
 #include "LocalMapping.h"
 #include "Atlas.h"
@@ -57,7 +59,8 @@ public:
 
     // The optional shutdown query only observes state and must be thread-safe/nonthrowing.
     LoopClosing(Atlas* pAtlas, KeyFrameDatabase* pDB, ORBVocabulary* pVoc,const bool bFixScale, const bool bActiveLC,
-                std::function<bool()> shutdownRequested = {});
+                std::function<bool()> shutdownRequested = {},
+                std::shared_ptr<spdlog::logger> logger = {});
 
     void SetTracker(Tracking* pTracker);
 
@@ -164,6 +167,8 @@ protected:
     std::mutex mMutexFinish;
     std::exception_ptr mWorkerFailure;
     const std::function<bool()> mShutdownRequested;
+    // Configured before worker launch and shared with the owning log session.
+    std::shared_ptr<spdlog::logger> mLogger;
 
     // Only the LoopClosing owner calls these; RequestFinish may run concurrently.
     void RunLoop();

@@ -20,6 +20,8 @@
 #ifndef LOCALMAPPING_H
 #define LOCALMAPPING_H
 
+#include "Logging.h"
+
 #include "KeyFrame.h"
 #include "Atlas.h"
 #include "LoopClosing.h"
@@ -43,7 +45,8 @@ class LocalMapping
 {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-    LocalMapping(System* pSys, Atlas* pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName=std::string());
+    LocalMapping(System* pSys, Atlas* pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName=std::string(),
+                 std::shared_ptr<spdlog::logger> logger = {});
 
     void SetLoopCloser(LoopClosing* pLoopCloser);
 
@@ -151,6 +154,8 @@ protected:
     void KeyFrameCulling();
 
     System *mpSystem;
+    // Configured before worker launch and shared with the owning log session.
+    std::shared_ptr<spdlog::logger> mLogger;
 
     bool mbMonocular;
     bool mbInertial;

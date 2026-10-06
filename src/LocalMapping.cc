@@ -30,8 +30,8 @@
 namespace ORB_SLAM3
 {
 
-LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName):
-    mpSystem(pSys), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
+LocalMapping::LocalMapping(System* pSys, Atlas *pAtlas, const float bMonocular, bool bInertial, const string &_strSeqName, std::shared_ptr<spdlog::logger> logger):
+    mpSystem(pSys), mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "local_mapping")), mbMonocular(bMonocular), mbInertial(bInertial), mbResetRequested(false), mbResetRequestedActiveMap(false), mbFinishRequested(false), mbFinished(true), mpAtlas(pAtlas), bInitializing(false),
     mbAbortBA(false), mbStopped(false), mbStopRequested(false), mbNotStop(false), mbAcceptKeyFrames(true),
     mIdxInit(0), mScale(1.0), mInitSect(0), mbNotBA1(true), mbNotBA2(true), mIdxIteration(0), infoInertial(Eigen::MatrixXd::Zero(9,9))
 {
@@ -194,7 +194,7 @@ void LocalMapping::RunLoop()
                         {
                             if((mTinit<10.f) && (dist<0.02))
                             {
-                                cout << "Not enough motion for initializing. Reseting..." << endl;
+                                Log(mLogger, spdlog::level::warn, "{}", "Not enough motion for initializing. Reseting...");
                                 unique_lock<mutex> lock(mMutexReset);
                                 mbResetRequestedActiveMap = true;
                                 mpMapToReset = mpCurrentKeyFrame->GetMap();
@@ -265,26 +265,26 @@ void LocalMapping::RunLoop()
                             // Check at each launch boundary: shutdown may arrive during LBA.
                             if (mTinit>5.0f && !mpSystem->isShutdownRequested() && !CheckFinish())
                             {
-                                cout << "start VIBA 1" << endl;
+                                Log(mLogger, spdlog::level::info, "{}", "start VIBA 1");
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA1();
                                 if (mbMonocular)
                                     InitializeIMU(1.f, 1e5, true);
                                 else
                                     InitializeIMU(1.f, 1e5, true);
 
-                                cout << "end VIBA 1" << endl;
+                                Log(mLogger, spdlog::level::info, "{}", "end VIBA 1");
                             }
                         }
                         else if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2()){
                             if (mTinit>15.0f && !mpSystem->isShutdownRequested() && !CheckFinish()){
-                                cout << "start VIBA 2" << endl;
+                                Log(mLogger, spdlog::level::info, "{}", "start VIBA 2");
                                 mpCurrentKeyFrame->GetMap()->SetIniertialBA2();
                                 if (mbMonocular)
                                     InitializeIMU(0.f, 0.f, true);
                                 else
                                     InitializeIMU(0.f, 0.f, true);
 
-                                cout << "end VIBA 2" << endl;
+                                Log(mLogger, spdlog::level::info, "{}", "end VIBA 2");
                             }
                         }
 
@@ -896,7 +896,7 @@ bool LocalMapping::Stop()
     if(mbStopRequested && !mbNotStop)
     {
         mbStopped = true;
-        cout << "Local Mapping STOP" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "Local Mapping STOP");
         return true;
     }
 
@@ -929,7 +929,7 @@ void LocalMapping::Release()
         delete *lit;
     mlNewKeyFrames.clear();
 
-    cout << "Local Mapping RELEASE" << endl;
+    Log(mLogger, spdlog::level::info, "{}", "Local Mapping RELEASE");
 }
 
 bool LocalMapping::AcceptKeyFrames()
@@ -1120,10 +1120,10 @@ void LocalMapping::RequestReset()
     RethrowFailure();
     {
         unique_lock<mutex> lock(mMutexReset);
-        cout << "LM: Map reset recieved" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "LM: Map reset recieved");
         mbResetRequested = true;
     }
-    cout << "LM: Map reset, waiting..." << endl;
+    Log(mLogger, spdlog::level::info, "{}", "LM: Map reset, waiting...");
 
     while(1)
     {
@@ -1135,7 +1135,7 @@ void LocalMapping::RequestReset()
         }
         usleep(3000);
     }
-    cout << "LM: Map reset, Done!!!" << endl;
+    Log(mLogger, spdlog::level::info, "{}", "LM: Map reset, Done!!!");
 }
 
 void LocalMapping::RequestResetActiveMap(Map* pMap)
@@ -1143,11 +1143,11 @@ void LocalMapping::RequestResetActiveMap(Map* pMap)
     RethrowFailure();
     {
         unique_lock<mutex> lock(mMutexReset);
-        cout << "LM: Active map reset recieved" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "LM: Active map reset recieved");
         mbResetRequestedActiveMap = true;
         mpMapToReset = pMap;
     }
-    cout << "LM: Active map reset, waiting..." << endl;
+    Log(mLogger, spdlog::level::info, "{}", "LM: Active map reset, waiting...");
 
     while(1)
     {
@@ -1159,7 +1159,7 @@ void LocalMapping::RequestResetActiveMap(Map* pMap)
         }
         usleep(3000);
     }
-    cout << "LM: Active map reset, Done!!!" << endl;
+    Log(mLogger, spdlog::level::info, "{}", "LM: Active map reset, Done!!!");
 }
 
 void LocalMapping::ResetIfRequested()
@@ -1171,7 +1171,7 @@ void LocalMapping::ResetIfRequested()
         {
             executed_reset = true;
 
-            cout << "LM: Reseting Atlas in Local Mapping..." << endl;
+            Log(mLogger, spdlog::level::info, "{}", "LM: Reseting Atlas in Local Mapping...");
             mlNewKeyFrames.clear();
             mlpRecentAddedMapPoints.clear();
             mbResetRequested = false;
@@ -1185,12 +1185,12 @@ void LocalMapping::ResetIfRequested()
 
             mIdxInit=0;
 
-            cout << "LM: End reseting Local Mapping..." << endl;
+            Log(mLogger, spdlog::level::info, "{}", "LM: End reseting Local Mapping...");
         }
 
         if(mbResetRequestedActiveMap) {
             executed_reset = true;
-            cout << "LM: Reseting current map in Local Mapping..." << endl;
+            Log(mLogger, spdlog::level::info, "{}", "LM: Reseting current map in Local Mapping...");
             mlNewKeyFrames.clear();
             mlpRecentAddedMapPoints.clear();
 
@@ -1202,11 +1202,11 @@ void LocalMapping::ResetIfRequested()
 
             mbResetRequested = false;
             mbResetRequestedActiveMap = false;
-            cout << "LM: End reseting Local Mapping..." << endl;
+            Log(mLogger, spdlog::level::info, "{}", "LM: End reseting Local Mapping...");
         }
     }
     if(executed_reset)
-        cout << "LM: Reset free the mutex" << endl;
+        Log(mLogger, spdlog::level::info, "{}", "LM: Reset free the mutex");
 
 }
 
@@ -1336,7 +1336,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     if (mScale<1e-1)
     {
-        cout << "scale too small" << endl;
+        Log(mLogger, spdlog::level::warn, "{}", "scale too small");
         bInitializing=false;
         return;
     }
@@ -1389,7 +1389,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     std::chrono::steady_clock::time_point t5 = std::chrono::steady_clock::now();
 
-    Verbose::PrintMess("Global Bundle Adjustment finished\nUpdating map ...", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Global Bundle Adjustment finished\nUpdating map ...");
 
     // Get Map Mutex
     unique_lock<mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
@@ -1428,7 +1428,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
                     pChild->mVwbGBA = Rcor * pChild->GetVelocity();
                 }
                 else {
-                    Verbose::PrintMess("Child velocity empty!! ", Verbose::VERBOSITY_NORMAL);
+                    Log(mLogger, spdlog::level::warn, "{}", "Child velocity empty!! ");
                 }
 
                 pChild->mBiasGBA = pChild->GetImuBias();
@@ -1447,7 +1447,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             pKF->SetVelocity(pKF->mVwbGBA);
             pKF->SetNewBias(pKF->mBiasGBA);
         } else {
-            cout << "KF " << pKF->mnId << " not set to inertial!! \n";
+            LogStream(mLogger, spdlog::level::warn, [&](std::ostream &report) { report << "KF " << pKF->mnId << " not set to inertial!! \n"; });
         }
 
         lpKFtoCheck.pop_front();
@@ -1484,7 +1484,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         }
     }
 
-    Verbose::PrintMess("Map updated!", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Map updated!");
 
     mnKFs=vpKF.size();
     mIdxInit++;
@@ -1541,7 +1541,7 @@ void LocalMapping::ScaleRefinement()
 
     if (mScale<1e-1) // 1e-1
     {
-        cout << "scale too small" << endl;
+        Log(mLogger, spdlog::level::warn, "{}", "scale too small");
         bInitializing=false;
         return;
     }

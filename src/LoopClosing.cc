@@ -34,9 +34,9 @@ namespace ORB_SLAM3
 {
 
 LoopClosing::LoopClosing(Atlas *pAtlas, KeyFrameDatabase *pDB, ORBVocabulary *pVoc, const bool bFixScale, const bool bActiveLC,
-                         std::function<bool()> shutdownRequested):
+                         std::function<bool()> shutdownRequested, std::shared_ptr<spdlog::logger> logger):
     mbResetRequested(false), mbResetActiveMapRequested(false), mbFinishRequested(false), mbFinished(true),
-    mShutdownRequested(std::move(shutdownRequested)), mpAtlas(pAtlas),
+    mShutdownRequested(std::move(shutdownRequested)), mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "loop_closing")), mpAtlas(pAtlas),
     mpKeyFrameDB(pDB), mpORBVocabulary(pVoc), mpMatchedKF(NULL), mLastLoopKFid(0), mbRunningGBA(false), mbFinishedGBA(true),
     mbFixScale(bFixScale), mnFullBAIdx(0), mnLoopNumCoincidences(0), mnMergeNumCoincidences(0),
     mbLoopDetected(false), mbMergeDetected(false), mnLoopNumNotFound(0), mnMergeNumNotFound(0), mbActiveLC(bActiveLC)
@@ -148,7 +148,7 @@ void LoopClosing::RunLoop()
                     if ((mpTracker->mSensor==System::IMU_MONOCULAR || mpTracker->mSensor==System::IMU_STEREO || mpTracker->mSensor==System::IMU_RGBD) &&
                         (!mpCurrentKF->GetMap()->isImuInitialized()))
                     {
-                        cout << "IMU is not initilized, merge is aborted" << endl;
+                        Log(mLogger, spdlog::level::warn, "{}", "IMU is not initilized, merge is aborted");
                     }
                     else
                     {
@@ -164,7 +164,7 @@ void LoopClosing::RunLoop()
 
                         if(mpCurrentKF->GetMap()->IsInertial() && mpMergeMatchedKF->GetMap()->IsInertial())
                         {
-                            cout << "Merge check transformation with IMU" << endl;
+                            Log(mLogger, spdlog::level::debug, "{}", "Merge check transformation with IMU");
                             if(mSold_new.scale()<0.90||mSold_new.scale()>1.1){
                                 mpMergeLastCurrentKF->SetErase();
                                 mpMergeMatchedKF->SetErase();
@@ -173,7 +173,7 @@ void LoopClosing::RunLoop()
                                 mvpMergeMPs.clear();
                                 mnMergeNumNotFound = 0;
                                 mbMergeDetected = false;
-                                Verbose::PrintMess("scale bad estimated. Abort merging", Verbose::VERBOSITY_NORMAL);
+                                Log(mLogger, spdlog::level::warn, "{}", "scale bad estimated. Abort merging");
                                 continue;
                             }
                             // If inertial, force only yaw
@@ -193,7 +193,7 @@ void LoopClosing::RunLoop()
 
                         //mpTracker->SetStepByStep(true);
 
-                        Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
+                        Log(mLogger, spdlog::level::info, "{}", "*Merge detected");
 
 #ifdef REGISTER_TIMES
                         std::chrono::steady_clock::time_point time_StartMerge = std::chrono::steady_clock::now();
@@ -213,7 +213,7 @@ void LoopClosing::RunLoop()
                         vdMergeTotal_ms.push_back(timeMergeTotal);
 #endif
 
-                        Verbose::PrintMess("Merge finished!", Verbose::VERBOSITY_QUIET);
+                        Log(mLogger, spdlog::level::info, "{}", "Merge finished!");
                     }
 
                     vdPR_CurrentTime.push_back(mpCurrentKF->mTimeStamp);
@@ -250,7 +250,7 @@ void LoopClosing::RunLoop()
                     vdPR_MatchedTime.push_back(mpLoopMatchedKF->mTimeStamp);
                     vnPR_TypeRecogn.push_back(0);
 
-                    Verbose::PrintMess("*Loop detected", Verbose::VERBOSITY_QUIET);
+                    Log(mLogger, spdlog::level::info, "{}", "*Loop detected");
 
                     mg2oLoopScw = mg2oLoopSlw; //*mvg2oSim3LoopTcw[nCurrentIndex];
                     if(mpCurrentKF->GetMap()->IsInertial())
@@ -260,7 +260,7 @@ void LoopClosing::RunLoop()
                         g2o::Sim3 g2oSww_new = g2oTwc*mg2oLoopScw;
 
                         Eigen::Vector3d phi = LogSO3(g2oSww_new.rotation().toRotationMatrix());
-                        cout << "phi = " << phi.transpose() << endl; 
+                        LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "phi = " << phi.transpose() << endl; });
                         if (fabs(phi(0))<0.008f && fabs(phi(1))<0.008f && fabs(phi(2))<0.349f)
                         {
                             if(mpCurrentKF->GetMap()->IsInertial())
@@ -279,7 +279,7 @@ void LoopClosing::RunLoop()
                         }
                         else
                         {
-                            cout << "BAD LOOP!!!" << endl;
+                            Log(mLogger, spdlog::level::warn, "{}", "BAD LOOP!!!");
                             bGoodLoop = false;
                         }
 
@@ -492,7 +492,7 @@ bool LoopClosing::NewDetectCommonRegions()
 
             if(!mbLoopDetected)
             {
-                cout << "PR: Loop detected with Reffine Sim3" << endl;
+                Log(mLogger, spdlog::level::info, "{}", "PR: Loop detected with Reffine Sim3");
             }
         }
         else
@@ -709,7 +709,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
         std::vector<KeyFrame*> vpCovKFi = pKFi->GetBestCovisibilityKeyFrames(nNumCovisibles);
         if(vpCovKFi.empty())
         {
-            std::cout << "Covisible list empty" << std::endl;
+            Log(mLogger, spdlog::level::debug, "{}", "Covisible list empty");
             vpCovKFi.push_back(pKFi);
         }
         else
@@ -1487,12 +1487,12 @@ void LoopClosing::MergeLocal()
     {
         if(!pKFi || pKFi->isBad())
         {
-            Verbose::PrintMess("Bad KF in correction", Verbose::VERBOSITY_DEBUG);
+            Log(mLogger, spdlog::level::debug, "{}", "Bad KF in correction");
             continue;
         }
 
         if(pKFi->GetMap() != pCurrentMap)
-            Verbose::PrintMess("Other map KF, this should't happen", Verbose::VERBOSITY_DEBUG);
+            Log(mLogger, spdlog::level::debug, "{}", "Other map KF, this should't happen");
 
         g2o::Sim3 g2oCorrectedSiw;
 
@@ -2132,7 +2132,7 @@ void LoopClosing::MergeLocal2()
 
 void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &spKFsMap2)
 {
-    cout << "----------------------" << endl;
+    Log(mLogger, spdlog::level::debug, "{}", "----------------------");
     for(KeyFrame* pKFi1 : spKFsMap1)
     {
         map<KeyFrame*, int> mMatchedMP;
@@ -2165,18 +2165,18 @@ void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &s
 
         if(mMatchedMP.size() == 0)
         {
-            cout << "CHECK-OBS: KF " << pKFi1->mnId << " has not any matched MP with the other map" << endl;
+            LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "CHECK-OBS: KF " << pKFi1->mnId << " has not any matched MP with the other map" << endl; });
         }
         else
         {
-            cout << "CHECK-OBS: KF " << pKFi1->mnId << " has matched MP with " << mMatchedMP.size() << " KF from the other map" << endl;
+            LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "CHECK-OBS: KF " << pKFi1->mnId << " has matched MP with " << mMatchedMP.size() << " KF from the other map" << endl; });
             for(pair<KeyFrame*, int> matchedKF : mMatchedMP)
             {
-                cout << "   -KF: " << matchedKF.first->mnId << ", Number of matches: " << matchedKF.second << endl;
+                LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "   -KF: " << matchedKF.first->mnId << ", Number of matches: " << matchedKF.second << endl; });
             }
         }
     }
-    cout << "----------------------" << endl;
+    Log(mLogger, spdlog::level::debug, "{}", "----------------------");
 }
 
 
@@ -2318,7 +2318,7 @@ void LoopClosing::ResetIfRequested()
     const std::scoped_lock<std::mutex, std::mutex> lock(mMutexReset, mMutexLoopQueue);
     if(mbResetRequested)
     {
-        cout << "Loop closer reset requested..." << endl;
+        Log(mLogger, spdlog::level::info, "{}", "Loop closer reset requested...");
         mlpLoopKeyFrameQueue.clear();
         mLastLoopKFid=0;  //TODO old variable, it is not use in the new algorithm
         mbResetRequested=false;
@@ -2347,7 +2347,7 @@ void LoopClosing::ResetIfRequested()
 void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF,
                                            std::uint64_t generation)
 {  
-    Verbose::PrintMess("Starting Global Bundle Adjustment", Verbose::VERBOSITY_NORMAL);
+    Log(mLogger, spdlog::level::info, "{}", "Starting Global Bundle Adjustment");
 
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_StartFGBA = std::chrono::steady_clock::now();
@@ -2391,8 +2391,8 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
 
         // Keep the accepted map-update stage within the generation lock.
         {
-            Verbose::PrintMess("Global Bundle Adjustment finished", Verbose::VERBOSITY_NORMAL);
-            Verbose::PrintMess("Updating map ...", Verbose::VERBOSITY_NORMAL);
+            Log(mLogger, spdlog::level::info, "{}", "Global Bundle Adjustment finished");
+            Log(mLogger, spdlog::level::info, "{}", "Updating map ...");
 
             mpLocalMapper->RequestStop();
             // Wait until Local Mapping has effectively stopped
@@ -2440,7 +2440,7 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
                             pChild->mVwbGBA = Rcor * pChild->GetVelocity();
                         }
                         else
-                            Verbose::PrintMess("Child velocity empty!! ", Verbose::VERBOSITY_NORMAL);
+                            Log(mLogger, spdlog::level::warn, "{}", "Child velocity empty!! ");
 
 
                         //cout << "Child bias: " << pChild->GetImuBias() << endl;
@@ -2580,7 +2580,7 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
             double timeFGBA = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndUpdateMap - time_StartFGBA).count();
             vdFGBATotal_ms.push_back(timeFGBA);
 #endif
-            Verbose::PrintMess("Map updated!", Verbose::VERBOSITY_NORMAL);
+            Log(mLogger, spdlog::level::info, "{}", "Map updated!");
         }
 
     }

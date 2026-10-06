@@ -20,6 +20,8 @@
 #ifndef TRACKING_H
 #define TRACKING_H
 
+#include "Logging.h"
+
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
 
@@ -61,7 +63,8 @@ class Tracking
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     Tracking(System* pSys, ORBVocabulary* pVoc, FrameDrawer* pFrameDrawer, MapDrawer* pMapDrawer, Atlas* pAtlas,
-             KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq=std::string());
+             KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq=std::string(),
+             std::shared_ptr<spdlog::logger> logger = {});
 
     ~Tracking();
 
@@ -283,6 +286,8 @@ protected:
     
     // System
     System* mpSystem;
+    // Configured before worker launch and shared with the owning log session.
+    std::shared_ptr<spdlog::logger> mLogger;
     
     //Drawers
     Viewer* mpViewer;
