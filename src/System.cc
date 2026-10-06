@@ -46,50 +46,58 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
                LoggerFactory loggerFactory):
     mLoggerFactory(MakeLoggerFactory(std::move(loggerFactory))),
     mLogger(GetModuleLogger(mLoggerFactory, "system")),
+    mFatalLogger(GetModuleLogger(mLoggerFactory, "system", true)),
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false),
     mExternalStopRequested(std::move(externalStopRequested)),
     mViewerStopNotification(std::move(viewerStopNotification))
 {
     // Output welcome message
-    cout << endl <<
-    "ORB-SLAM3 Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
-    "ORB-SLAM2 Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
-    "This program comes with ABSOLUTELY NO WARRANTY;" << endl  <<
-    "This is free software, and you are welcome to redistribute it" << endl <<
-    "under certain conditions. See LICENSE.txt." << endl << endl;
+    LogStream(mLogger, spdlog::level::info, [](std::ostream &output) {
+        output << endl <<
+        "ORB-SLAM3 Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
+        "ORB-SLAM2 Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
+        "This program comes with ABSOLUTELY NO WARRANTY;" << endl  <<
+        "This is free software, and you are welcome to redistribute it" << endl <<
+        "under certain conditions. See LICENSE.txt." << endl << endl;
+    });
 
-    cout << "Input sensor was set to: ";
+    LogStream(mLogger, spdlog::level::info, [this](std::ostream &output) {
+        output << "Input sensor was set to: ";
 
-    if(mSensor==MONOCULAR)
-        cout << "Monocular" << endl;
-    else if(mSensor==STEREO)
-        cout << "Stereo" << endl;
-    else if(mSensor==RGBD)
-        cout << "RGB-D" << endl;
-    else if(mSensor==IMU_MONOCULAR)
-        cout << "Monocular-Inertial" << endl;
-    else if(mSensor==IMU_STEREO)
-        cout << "Stereo-Inertial" << endl;
-    else if(mSensor==IMU_RGBD)
-        cout << "RGB-D-Inertial" << endl;
+        if(mSensor==MONOCULAR)
+            output << "Monocular" << endl;
+        else if(mSensor==STEREO)
+            output << "Stereo" << endl;
+        else if(mSensor==RGBD)
+            output << "RGB-D" << endl;
+        else if(mSensor==IMU_MONOCULAR)
+            output << "Monocular-Inertial" << endl;
+        else if(mSensor==IMU_STEREO)
+            output << "Stereo-Inertial" << endl;
+        else if(mSensor==IMU_RGBD)
+            output << "RGB-D-Inertial" << endl;
+    });
 
     //Check settings file
     cv::FileStorage fsSettings(strSettingsFile.c_str(), cv::FileStorage::READ);
     if(!fsSettings.isOpened())
     {
-       cerr << "Failed to open settings file at: " << strSettingsFile << endl;
+       Log(mFatalLogger, spdlog::level::critical, "Failed to open settings file at: {}", strSettingsFile);
        exit(-1);
     }
 
     cv::FileNode node = fsSettings["File.version"];
     if(!node.empty() && node.isString() && node.string() == "1.0"){
-        settings_ = new Settings(strSettingsFile,mSensor);
+        settings_ = new Settings(strSettingsFile,mSensor,
+                                 GetLogger("settings"), GetLogger("settings", true));
 
         mStrLoadAtlasFromFile = settings_->atlasLoadFile();
         mStrSaveAtlasToFile = settings_->atlasSaveFile();
 
-        cout << (*settings_) << endl;
+        LogStream(mLogger, spdlog::level::info, [this](std::ostream &output) {
+            output << (*settings_) << endl;
+        });
     }
     else{
         settings_ = nullptr;
@@ -120,53 +128,53 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     if(mStrLoadAtlasFromFile.empty())
     {
         //Load ORB Vocabulary
-        cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
+        Log(mLogger, spdlog::level::info, "Loading ORB Vocabulary. This could take a while...");
 
         mpVocabulary = new ORBVocabulary();
         bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
         if(!bVocLoad)
         {
-            cerr << "Wrong path to vocabulary. " << endl;
-            cerr << "Falied to open at: " << strVocFile << endl;
+            Log(mFatalLogger, spdlog::level::critical, "Wrong path to vocabulary. ");
+            Log(mFatalLogger, spdlog::level::critical, "Falied to open at: {}", strVocFile);
             exit(-1);
         }
-        cout << "Vocabulary loaded!" << endl << endl;
+        Log(mLogger, spdlog::level::info, "Vocabulary loaded!");
 
         //Create KeyFrame Database
         mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
 
         //Create the Atlas
-        cout << "Initialization of Atlas from scratch " << endl;
-        mpAtlas = new Atlas(0);
+        Log(mLogger, spdlog::level::info, "Initialization of Atlas from scratch ");
+        mpAtlas = new Atlas(0, GetLogger("atlas"), GetLogger("map"));
     }
     else
     {
         //Load ORB Vocabulary
-        cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
+        Log(mLogger, spdlog::level::info, "Loading ORB Vocabulary. This could take a while...");
 
         mpVocabulary = new ORBVocabulary();
         bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
         if(!bVocLoad)
         {
-            cerr << "Wrong path to vocabulary. " << endl;
-            cerr << "Falied to open at: " << strVocFile << endl;
+            Log(mFatalLogger, spdlog::level::critical, "Wrong path to vocabulary. ");
+            Log(mFatalLogger, spdlog::level::critical, "Falied to open at: {}", strVocFile);
             exit(-1);
         }
-        cout << "Vocabulary loaded!" << endl << endl;
+        Log(mLogger, spdlog::level::info, "Vocabulary loaded!");
 
         //Create KeyFrame Database
         mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
 
-        cout << "Load File" << endl;
+        Log(mLogger, spdlog::level::info, "Load File");
 
         // Load the file with an earlier session
         //clock_t start = clock();
-        cout << "Initialization of Atlas from file: " << mStrLoadAtlasFromFile << endl;
+        Log(mLogger, spdlog::level::info, "Initialization of Atlas from file: {}", mStrLoadAtlasFromFile);
         bool isRead = LoadAtlas(FileType::BINARY_FILE);
 
         if(!isRead)
         {
-            cout << "Error to load the file, please try with other session file or vocabulary file" << endl;
+            Log(mFatalLogger, spdlog::level::critical, "Error to load the file, please try with other session file or vocabulary file");
             exit(-1);
         }
         //mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
@@ -195,7 +203,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     //Initialize the Tracking thread
     //(it will live in the main thread of execution, the one that called this constructor)
-    cout << "Seq. Name: " << strSequence << endl;
+    Log(mLogger, spdlog::level::info, "Seq. Name: {}", strSequence);
     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
                              mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence);
 
@@ -212,7 +220,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         mpLocalMapper->mThFarPoints = fsSettings["thFarPoints"];
     if(mpLocalMapper->mThFarPoints!=0)
     {
-        cout << "Discard points further than " << mpLocalMapper->mThFarPoints << " m from current camera" << endl;
+        Log(mLogger, spdlog::level::info, "Discard points further than {} m from current camera", mpLocalMapper->mThFarPoints);
         mpLocalMapper->mbFarPoints = true;
     }
     else
@@ -259,7 +267,7 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
 {
     if(mSensor!=STEREO && mSensor!=IMU_STEREO)
     {
-        cerr << "ERROR: you called TrackStereo but input sensor was not set to Stereo nor Stereo-Inertial." << endl;
+        Log(mFatalLogger, spdlog::level::critical, "ERROR: you called TrackStereo but input sensor was not set to Stereo nor Stereo-Inertial.");
         exit(-1);
     }
 
@@ -343,7 +351,7 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
 {
     if(mSensor!=RGBD  && mSensor!=IMU_RGBD)
     {
-        cerr << "ERROR: you called TrackRGBD but input sensor was not set to RGBD." << endl;
+        Log(mFatalLogger, spdlog::level::critical, "ERROR: you called TrackRGBD but input sensor was not set to RGBD.");
         exit(-1);
     }
 
@@ -421,7 +429,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
 
     if(mSensor!=MONOCULAR && mSensor!=IMU_MONOCULAR)
     {
-        cerr << "ERROR: you called TrackMonocular but input sensor was not set to Monocular nor Monocular-Inertial." << endl;
+        Log(mFatalLogger, spdlog::level::critical, "ERROR: you called TrackMonocular but input sensor was not set to Monocular nor Monocular-Inertial.");
         exit(-1);
     }
 
@@ -467,7 +475,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         }
         else if(mbResetActiveMap)
         {
-            cout << "SYSTEM-> Reseting active map in monocular case" << endl;
+            Log(mLogger, spdlog::level::info, "SYSTEM-> Reseting active map in monocular case");
             mpTracker->ResetActiveMap();
             mbResetActiveMap = false;
         }
@@ -585,7 +593,7 @@ void System::Shutdown()
 
     if(!mStrSaveAtlasToFile.empty())
     {
-        Verbose::PrintMess("Atlas saving to file " + mStrSaveAtlasToFile, Verbose::VERBOSITY_NORMAL);
+        Log(mLogger, spdlog::level::info, "Atlas saving to file {}", mStrSaveAtlasToFile);
         SaveAtlas(FileType::BINARY_FILE);
     }
 
@@ -608,7 +616,7 @@ void System::Shutdown()
             SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
         }
         else
-            cout << "Viewer trajectory save skipped: no keyframes" << endl;
+            Log(mLogger, spdlog::level::info, "Viewer trajectory save skipped: no keyframes");
     }
     mShutdownCompleted = true;
 
@@ -626,10 +634,10 @@ bool System::isShutDown() {
 
 void System::SaveTrajectoryTUM(const string &filename)
 {
-    cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "Saving camera trajectory to {} ...", filename);
     if(mSensor==MONOCULAR)
     {
-        cerr << "ERROR: SaveTrajectoryTUM cannot be used for monocular." << endl;
+        Log(mLogger, spdlog::level::err, "ERROR: SaveTrajectoryTUM cannot be used for monocular.");
         return;
     }
 
@@ -686,7 +694,7 @@ void System::SaveTrajectoryTUM(const string &filename)
 
 void System::SaveKeyFrameTrajectoryTUM(const string &filename)
 {
-    cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "Saving keyframe trajectory to {} ...", filename);
 
     vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
@@ -720,7 +728,7 @@ void System::SaveKeyFrameTrajectoryTUM(const string &filename)
 void System::SaveTrajectoryEuRoC(const string &filename)
 {
 
-    cout << endl << "Saving trajectory to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "Saving trajectory to {} ...", filename);
     /*if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryEuRoC cannot be used for monocular." << endl;
@@ -730,10 +738,10 @@ void System::SaveTrajectoryEuRoC(const string &filename)
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
     int numMaxKFs = 0;
     Map* pBiggerMap;
-    std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
+    Log(mLogger, spdlog::level::info, "There are {} maps in the atlas", std::to_string(vpMaps.size()));
     for(Map* pMap :vpMaps)
     {
-        std::cout << "  Map " << std::to_string(pMap->GetId()) << " has " << std::to_string(pMap->GetAllKeyFrames().size()) << " KFs" << std::endl;
+        Log(mLogger, spdlog::level::info, "  Map {} has {} KFs", std::to_string(pMap->GetId()), std::to_string(pMap->GetAllKeyFrames().size()));
         if(pMap->GetAllKeyFrames().size() > numMaxKFs)
         {
             numMaxKFs = pMap->GetAllKeyFrames().size();
@@ -831,13 +839,13 @@ void System::SaveTrajectoryEuRoC(const string &filename)
     }
     //cout << "end saving trajectory" << endl;
     f.close();
-    cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "End of saving trajectory to {} ...", filename);
 }
 
 void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 {
 
-    cout << endl << "Saving trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "Saving trajectory of map {} to {} ...", pMap->GetId(), filename);
     /*if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryEuRoC cannot be used for monocular." << endl;
@@ -936,7 +944,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
     }
     //cout << "end saving trajectory" << endl;
     f.close();
-    cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "End of saving trajectory to {} ...", filename);
 }
 
 /*void System::SaveTrajectoryEuRoC(const string &filename)
@@ -1114,7 +1122,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 
 void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
 {
-    cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "Saving keyframe trajectory to {} ...", filename);
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
     Map* pBiggerMap;
@@ -1130,7 +1138,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
 
     if(!pBiggerMap)
     {
-        std::cout << "There is not a map!!" << std::endl;
+        Log(mLogger, spdlog::level::err, "There is not a map!!");
         return;
     }
 
@@ -1172,7 +1180,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
 
 void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
 {
-    cout << endl << "Saving keyframe trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "Saving keyframe trajectory of map {} to {} ...", pMap->GetId(), filename);
 
     vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
@@ -1263,10 +1271,10 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
 
 void System::SaveTrajectoryKITTI(const string &filename)
 {
-    cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
+    Log(mLogger, spdlog::level::info, "Saving camera trajectory to {} ...", filename);
     if(mSensor==MONOCULAR)
     {
-        cerr << "ERROR: SaveTrajectoryKITTI cannot be used for monocular." << endl;
+        Log(mLogger, spdlog::level::err, "ERROR: SaveTrajectoryKITTI cannot be used for monocular.");
         return;
     }
 
@@ -1476,7 +1484,7 @@ void System::SaveAtlas(int type){
 
         if(type == TEXT_FILE) // File text
         {
-            cout << "Starting to write the save text file " << endl;
+            Log(mLogger, spdlog::level::info, "Starting to write the save text file ");
             std::remove(pathSaveFileName.c_str());
             std::ofstream ofs(pathSaveFileName, std::ios::binary);
             boost::archive::text_oarchive oa(ofs);
@@ -1484,18 +1492,18 @@ void System::SaveAtlas(int type){
             oa << strVocabularyName;
             oa << strVocabularyChecksum;
             oa << mpAtlas;
-            cout << "End to write the save text file" << endl;
+            Log(mLogger, spdlog::level::info, "End to write the save text file");
         }
         else if(type == BINARY_FILE) // File binary
         {
-            cout << "Starting to write the save binary file" << endl;
+            Log(mLogger, spdlog::level::info, "Starting to write the save binary file");
             std::remove(pathSaveFileName.c_str());
             std::ofstream ofs(pathSaveFileName, std::ios::binary);
             boost::archive::binary_oarchive oa(ofs);
             oa << strVocabularyName;
             oa << strVocabularyChecksum;
             oa << mpAtlas;
-            cout << "End to write save binary file" << endl;
+            Log(mLogger, spdlog::level::info, "End to write save binary file");
         }
     }
 }
@@ -1511,34 +1519,34 @@ bool System::LoadAtlas(int type)
 
     if(type == TEXT_FILE) // File text
     {
-        cout << "Starting to read the save text file " << endl;
+        Log(mLogger, spdlog::level::info, "Starting to read the save text file ");
         std::ifstream ifs(pathLoadFileName, std::ios::binary);
         if(!ifs.good())
         {
-            cout << "Load file not found" << endl;
+            Log(mLogger, spdlog::level::err, "Load file not found");
             return false;
         }
         boost::archive::text_iarchive ia(ifs);
         ia >> strFileVoc;
         ia >> strVocChecksum;
         ia >> mpAtlas;
-        cout << "End to load the save text file " << endl;
+        Log(mLogger, spdlog::level::info, "End to load the save text file ");
         isRead = true;
     }
     else if(type == BINARY_FILE) // File binary
     {
-        cout << "Starting to read the save binary file"  << endl;
+        Log(mLogger, spdlog::level::info, "Starting to read the save binary file");
         std::ifstream ifs(pathLoadFileName, std::ios::binary);
         if(!ifs.good())
         {
-            cout << "Load file not found" << endl;
+            Log(mLogger, spdlog::level::err, "Load file not found");
             return false;
         }
         boost::archive::binary_iarchive ia(ifs);
         ia >> strFileVoc;
         ia >> strVocChecksum;
         ia >> mpAtlas;
-        cout << "End to load the save binary file" << endl;
+        Log(mLogger, spdlog::level::info, "End to load the save binary file");
         isRead = true;
     }
 
@@ -1549,11 +1557,14 @@ bool System::LoadAtlas(int type)
 
         if(strInputVocabularyChecksum.compare(strVocChecksum) != 0)
         {
-            cout << "The vocabulary load isn't the same which the load session was created " << endl;
-            cout << "-Vocabulary name: " << strFileVoc << endl;
+            Log(mLogger, spdlog::level::err, "The vocabulary load isn't the same which the load session was created ");
+            Log(mLogger, spdlog::level::err, "-Vocabulary name: {}", strFileVoc);
             return false; // Both are differents
         }
 
+        // Logger handles are runtime-only. Reattach them after deserialization
+        // and before PostLoad or any worker can use the restored maps.
+        mpAtlas->SetLoggers(GetLogger("atlas"), GetLogger("map"));
         mpAtlas->SetKeyFrameDababase(mpKeyFrameDatabase);
         mpAtlas->SetORBVocabulary(mpVocabulary);
         mpAtlas->PostLoad();
@@ -1576,7 +1587,7 @@ string System::CalculateCheckSum(string filename, int type)
     ifstream f(filename.c_str(), flags);
     if ( !f.is_open() )
     {
-        cout << "[E] Unable to open the in file " << filename << " for Md5 hash." << endl;
+        Log(mLogger, spdlog::level::err, "[E] Unable to open the in file {} for Md5 hash.", filename);
         return checksum;
     }
 

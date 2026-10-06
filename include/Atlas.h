@@ -73,8 +73,14 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
     Atlas();
-    Atlas(int initKFid); // When its initialization the first map is created
+    Atlas(int initKFid, std::shared_ptr<spdlog::logger> logger = {},
+          std::shared_ptr<spdlog::logger> mapLogger = {}); // When its initialization the first map is created
     ~Atlas();
+
+    // Setup/deserialization only, before workers can access this atlas. This
+    // also reconnects restored maps; no logger handles enter serialize().
+    void SetLoggers(std::shared_ptr<spdlog::logger> logger,
+                    std::shared_ptr<spdlog::logger> mapLogger);
 
     void CreateNewMap();
     void ChangeMap(Map* pMap);
@@ -140,6 +146,9 @@ public:
     long unsigned int GetNumLivedMP();
 
 protected:
+
+    std::shared_ptr<spdlog::logger> mLogger;
+    std::shared_ptr<spdlog::logger> mMapLogger;
 
     std::set<Map*> mspMaps;
     std::set<Map*> mspBadMaps;

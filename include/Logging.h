@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -56,6 +57,27 @@ inline void Log(const std::shared_ptr<spdlog::logger> &logger,
         // spdlog reports unknown exceptions before rethrowing. Keep those from
         // interrupting SLAM cleanup, and never recurse into a failing logger.
         std::fprintf(stderr, "ORB-SLAM3 logging failed\n");
+    }
+}
+
+// Preserve existing ostream reports while giving each line a module prefix.
+// Writer runs only when enabled, inside the same nonthrowing logging boundary.
+template<typename Writer>
+inline void LogStream(const std::shared_ptr<spdlog::logger> &logger,
+                      spdlog::level::level_enum level, Writer &&writer) noexcept
+{
+    if (!logger->should_log(level)) return;
+    try
+    {
+        std::ostringstream report;
+        writer(report);
+        std::istringstream lines(report.str());
+        std::string line;
+        while (std::getline(lines, line)) Log(logger, level, "{}", line);
+    }
+    catch (...)
+    {
+        Log(logger, spdlog::level::err, "Logging report formatting failed");
     }
 }
 } // namespace ORB_SLAM3

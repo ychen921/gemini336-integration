@@ -230,6 +230,7 @@ private:
     // Logging is ready before the constructor emits messages or starts workers.
     LoggerFactory mLoggerFactory;
     std::shared_ptr<spdlog::logger> mLogger;
+    std::shared_ptr<spdlog::logger> mFatalLogger;
 
     // Input sensor
     eSensor mSensor;

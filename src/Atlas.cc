@@ -27,12 +27,15 @@ namespace ORB_SLAM3
 {
 
 Atlas::Atlas(){
+    SetLoggers({}, {});
     mpCurrentMap = static_cast<Map*>(NULL);
 }
 
-Atlas::Atlas(int initKFid): mnLastInitKFidMap(initKFid), mHasViewer(false)
+Atlas::Atlas(int initKFid, std::shared_ptr<spdlog::logger> logger,
+             std::shared_ptr<spdlog::logger> mapLogger): mnLastInitKFidMap(initKFid), mHasViewer(false)
 {
     mpCurrentMap = static_cast<Map*>(NULL);
+    SetLoggers(std::move(logger), std::move(mapLogger));
     CreateNewMap();
 }
 
@@ -55,23 +58,41 @@ Atlas::~Atlas()
     }
 }
 
+void Atlas::SetLoggers(std::shared_ptr<spdlog::logger> logger,
+                       std::shared_ptr<spdlog::logger> mapLogger)
+{
+    if (!logger && !mapLogger)
+    {
+        const LoggerFactory factory = MakeLoggerFactory({});
+        logger = GetModuleLogger(factory, "atlas");
+        mapLogger = GetModuleLogger(factory, "map");
+    }
+    else if (!logger || !mapLogger)
+        throw std::invalid_argument("Atlas requires both atlas and map loggers");
+    mLogger = std::move(logger);
+    mMapLogger = std::move(mapLogger);
+    // Existing maps and deserialized backup maps must both retain this session.
+    for (Map* map : mspMaps) map->SetLogger(mMapLogger);
+    for (Map* map : mvpBackupMaps) map->SetLogger(mMapLogger);
+}
+
 void Atlas::CreateNewMap()
 {
     unique_lock<mutex> lock(mMutexAtlas);
-    cout << "Creation of new map with id: " << Map::nNextId << endl;
+    Log(mLogger, spdlog::level::info, "Creation of new map with id: {}", Map::nNextId);
     if(mpCurrentMap){
         if(!mspMaps.empty() && mnLastInitKFidMap < mpCurrentMap->GetMaxKFid())
             mnLastInitKFidMap = mpCurrentMap->GetMaxKFid()+1; //The init KF is the next of current maximum
 
         mpCurrentMap->SetStoredMap();
-        cout << "Stored map with ID: " << mpCurrentMap->GetId() << endl;
+        Log(mLogger, spdlog::level::info, "Stored map with ID: {}", mpCurrentMap->GetId());
 
         //if(mHasViewer)
         //    mpViewer->AddMapToCreateThumbnail(mpCurrentMap);
     }
-    cout << "Creation of new map with last KF id: " << mnLastInitKFidMap << endl;
+    Log(mLogger, spdlog::level::info, "Creation of new map with last KF id: {}", mnLastInitKFidMap);
 
-    mpCurrentMap = new Map(mnLastInitKFidMap);
+    mpCurrentMap = new Map(mnLastInitKFidMap, mMapLogger);
     mpCurrentMap->SetCurrentMap();
     mspMaps.insert(mpCurrentMap);
 }
@@ -79,7 +100,7 @@ void Atlas::CreateNewMap()
 void Atlas::ChangeMap(Map* pMap)
 {
     unique_lock<mutex> lock(mMutexAtlas);
-    cout << "Change to map with id: " << pMap->GetId() << endl;
+    Log(mLogger, spdlog::level::info, "Change to map with id: {}", pMap->GetId());
     if(mpCurrentMap){
         mpCurrentMap->SetStoredMap();
     }
@@ -120,8 +141,8 @@ GeometricCamera* Atlas::AddCamera(GeometricCamera* pCam)
     for(size_t i=0; i < mvpCameras.size(); ++i)
     {
         GeometricCamera* pCam_i = mvpCameras[i];
-        if(!pCam) std::cout << "Not pCam" << std::endl;
-        if(!pCam_i) std::cout << "Not pCam_i" << std::endl;
+        if(!pCam) Log(mLogger, spdlog::level::err, "Not pCam");
+        if(!pCam_i) Log(mLogger, spdlog::level::err, "Not pCam_i");
         if(pCam->GetType() != pCam_i->GetType())
             continue;
 

@@ -24,6 +24,7 @@
 //#define REGISTER_TIMES
 
 #include "CameraModels/GeometricCamera.h"
+#include "Logging.h"
 
 #include <unistd.h>
 #include <stdio.h>
@@ -55,7 +56,9 @@ namespace ORB_SLAM3 {
         /*
          * Constructor from file
          */
-        Settings(const std::string &configFile, const int& sensor);
+        Settings(const std::string &configFile, const int& sensor,
+                 std::shared_ptr<spdlog::logger> logger = {},
+                 std::shared_ptr<spdlog::logger> fatalLogger = {});
 
         /*
          * Ostream operator overloading to dump settings to the terminal
@@ -123,16 +126,21 @@ namespace ORB_SLAM3 {
         cv::Mat M2r() {return M2r_;}
 
     private:
+        // Both handles are prepared before parameter loading; fatal diagnostics
+        // must reach the same sinks before the existing exit(-1) paths.
+        std::shared_ptr<spdlog::logger> mLogger;
+        std::shared_ptr<spdlog::logger> mFatalLogger;
+
         template<typename T>
         T readParameter(cv::FileStorage& fSettings, const std::string& name, bool& found,const bool required = true){
             cv::FileNode node = fSettings[name];
             if(node.empty()){
                 if(required){
-                    std::cerr << name << " required parameter does not exist, aborting..." << std::endl;
+                    Log(mFatalLogger, spdlog::level::critical, "{} required parameter does not exist, aborting...", name);
                     exit(-1);
                 }
                 else{
-                    std::cerr << name << " optional parameter does not exist..." << std::endl;
+                    Log(mLogger, spdlog::level::warn, "{} optional parameter does not exist...", name);
                     found = false;
                     return T();
                 }

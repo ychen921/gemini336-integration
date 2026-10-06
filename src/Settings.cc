@@ -37,17 +37,17 @@ namespace ORB_SLAM3 {
         cv::FileNode node = fSettings[name];
         if(node.empty()){
             if(required){
-                std::cerr << name << " required parameter does not exist, aborting..." << std::endl;
+                Log(mFatalLogger, spdlog::level::critical, "{} required parameter does not exist, aborting...", name);
                 exit(-1);
             }
             else{
-                std::cerr << name << " optional parameter does not exist..." << std::endl;
+                Log(mLogger, spdlog::level::warn, "{} optional parameter does not exist...", name);
                 found = false;
                 return 0.0f;
             }
         }
         else if(!node.isReal()){
-            std::cerr << name << " parameter must be a real number, aborting..." << std::endl;
+            Log(mFatalLogger, spdlog::level::critical, "{} parameter must be a real number, aborting...", name);
             exit(-1);
         }
         else{
@@ -61,17 +61,17 @@ namespace ORB_SLAM3 {
         cv::FileNode node = fSettings[name];
         if(node.empty()){
             if(required){
-                std::cerr << name << " required parameter does not exist, aborting..." << std::endl;
+                Log(mFatalLogger, spdlog::level::critical, "{} required parameter does not exist, aborting...", name);
                 exit(-1);
             }
             else{
-                std::cerr << name << " optional parameter does not exist..." << std::endl;
+                Log(mLogger, spdlog::level::warn, "{} optional parameter does not exist...", name);
                 found = false;
                 return 0;
             }
         }
         else if(!node.isInt()){
-            std::cerr << name << " parameter must be an integer number, aborting..." << std::endl;
+            Log(mFatalLogger, spdlog::level::critical, "{} parameter must be an integer number, aborting...", name);
             exit(-1);
         }
         else{
@@ -85,17 +85,17 @@ namespace ORB_SLAM3 {
         cv::FileNode node = fSettings[name];
         if(node.empty()){
             if(required){
-                std::cerr << name << " required parameter does not exist, aborting..." << std::endl;
+                Log(mFatalLogger, spdlog::level::critical, "{} required parameter does not exist, aborting...", name);
                 exit(-1);
             }
             else{
-                std::cerr << name << " optional parameter does not exist..." << std::endl;
+                Log(mLogger, spdlog::level::warn, "{} optional parameter does not exist...", name);
                 found = false;
                 return string();
             }
         }
         else if(!node.isString()){
-            std::cerr << name << " parameter must be a string, aborting..." << std::endl;
+            Log(mFatalLogger, spdlog::level::critical, "{} parameter must be a string, aborting...", name);
             exit(-1);
         }
         else{
@@ -109,11 +109,11 @@ namespace ORB_SLAM3 {
         cv::FileNode node = fSettings[name];
         if(node.empty()){
             if(required){
-                std::cerr << name << " required parameter does not exist, aborting..." << std::endl;
+                Log(mFatalLogger, spdlog::level::critical, "{} required parameter does not exist, aborting...", name);
                 exit(-1);
             }
             else{
-                std::cerr << name << " optional parameter does not exist..." << std::endl;
+                Log(mLogger, spdlog::level::warn, "{} optional parameter does not exist...", name);
                 found = false;
                 return cv::Mat();
             }
@@ -124,61 +124,73 @@ namespace ORB_SLAM3 {
         }
     }
 
-    Settings::Settings(const std::string &configFile, const int& sensor) :
+    Settings::Settings(const std::string &configFile, const int& sensor,
+                       std::shared_ptr<spdlog::logger> logger,
+                       std::shared_ptr<spdlog::logger> fatalLogger) :
+    mLogger(std::move(logger)), mFatalLogger(std::move(fatalLogger)),
     bNeedToUndistort_(false), bNeedToRectify_(false), bNeedToResize1_(false), bNeedToResize2_(false) {
+        // Standalone settings use one shared console sink for both paths.
+        if (!mLogger && !mFatalLogger)
+        {
+            const LoggerFactory factory = MakeLoggerFactory({});
+            mLogger = GetModuleLogger(factory, "settings");
+            mFatalLogger = GetModuleLogger(factory, "settings", true);
+        }
+        else if (!mLogger || !mFatalLogger)
+            throw std::invalid_argument("Settings requires both normal and synchronous loggers");
         sensor_ = sensor;
 
         //Open settings file
         cv::FileStorage fSettings(configFile, cv::FileStorage::READ);
         if (!fSettings.isOpened()) {
-            cerr << "[ERROR]: could not open configuration file at: " << configFile << endl;
-            cerr << "Aborting..." << endl;
+            Log(mFatalLogger, spdlog::level::critical, "[ERROR]: could not open configuration file at: {}", configFile);
+            Log(mFatalLogger, spdlog::level::critical, "Aborting...");
 
             exit(-1);
         }
         else{
-            cout << "Loading settings from " << configFile << endl;
+            Log(mLogger, spdlog::level::info, "Loading settings from {}", configFile);
         }
 
         //Read first camera
         readCamera1(fSettings);
-        cout << "\t-Loaded camera 1" << endl;
+        Log(mLogger, spdlog::level::info, "\t-Loaded camera 1");
 
         //Read second camera if stereo (not rectified)
         if(sensor_ == System::STEREO || sensor_ == System::IMU_STEREO){
             readCamera2(fSettings);
-            cout << "\t-Loaded camera 2" << endl;
+            Log(mLogger, spdlog::level::info, "\t-Loaded camera 2");
         }
 
         //Read image info
         readImageInfo(fSettings);
-        cout << "\t-Loaded image info" << endl;
+        Log(mLogger, spdlog::level::info, "\t-Loaded image info");
 
         if(sensor_ == System::IMU_MONOCULAR || sensor_ == System::IMU_STEREO || sensor_ == System::IMU_RGBD){
             readIMU(fSettings);
-            cout << "\t-Loaded IMU calibration" << endl;
+            Log(mLogger, spdlog::level::info, "\t-Loaded IMU calibration");
         }
 
         if(sensor_ == System::RGBD || sensor_ == System::IMU_RGBD){
             readRGBD(fSettings);
-            cout << "\t-Loaded RGB-D calibration" << endl;
+            Log(mLogger, spdlog::level::info, "\t-Loaded RGB-D calibration");
         }
 
         readORB(fSettings);
-        cout << "\t-Loaded ORB settings" << endl;
+        Log(mLogger, spdlog::level::info, "\t-Loaded ORB settings");
         readViewer(fSettings);
-        cout << "\t-Loaded viewer settings" << endl;
+        Log(mLogger, spdlog::level::info, "\t-Loaded viewer settings");
         readLoadAndSave(fSettings);
-        cout << "\t-Loaded Atlas settings" << endl;
+        Log(mLogger, spdlog::level::info, "\t-Loaded Atlas settings");
         readOtherParameters(fSettings);
-        cout << "\t-Loaded misc parameters" << endl;
+        Log(mLogger, spdlog::level::info, "\t-Loaded misc parameters");
 
         if(bNeedToRectify_){
             precomputeRectificationMaps();
-            cout << "\t-Computed rectification maps" << endl;
+            Log(mLogger, spdlog::level::info, "\t-Computed rectification maps");
         }
 
-        cout << "----------------------------------" << endl;
+        Log(mLogger, spdlog::level::info, "----------------------------------");
     }
 
     void Settings::readCamera1(cv::FileStorage &fSettings) {
@@ -268,7 +280,7 @@ namespace ORB_SLAM3 {
             }
         }
         else{
-            cerr << "Error: " << cameraModel << " not known" << endl;
+            Log(mFatalLogger, spdlog::level::critical, "Error: {} not known", cameraModel);
             exit(-1);
         }
     }

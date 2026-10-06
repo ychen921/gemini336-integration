@@ -26,14 +26,16 @@ namespace ORB_SLAM3
 
 long unsigned int Map::nNextId=0;
 
-Map::Map():mnMaxKFid(0),mnBigChangeIdx(0), mbImuInitialized(false), mnMapChange(0), mpFirstRegionKF(static_cast<KeyFrame*>(NULL)),
+Map::Map():mLogger(GetModuleLogger(MakeLoggerFactory({}), "map")), mnMaxKFid(0),mnBigChangeIdx(0), mbImuInitialized(false), mnMapChange(0), mpFirstRegionKF(static_cast<KeyFrame*>(NULL)),
 mbFail(false), mIsInUse(false), mHasTumbnail(false), mbBad(false), mnMapChangeNotified(0), mbIsInertial(false), mbIMU_BA1(false), mbIMU_BA2(false)
 {
     mnId=nNextId++;
     mThumbnail = static_cast<GLubyte*>(NULL);
 }
 
-Map::Map(int initKFid):mnInitKFid(initKFid), mnMaxKFid(initKFid),/*mnLastLoopKFid(initKFid),*/ mnBigChangeIdx(0), mIsInUse(false),
+Map::Map(int initKFid, std::shared_ptr<spdlog::logger> logger):
+                       mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "map")),
+                       mnInitKFid(initKFid), mnMaxKFid(initKFid),/*mnLastLoopKFid(initKFid),*/ mnBigChangeIdx(0), mIsInUse(false),
                        mHasTumbnail(false), mbBad(false), mbImuInitialized(false), mpFirstRegionKF(static_cast<KeyFrame*>(NULL)),
                        mnMapChange(0), mbFail(false), mnMapChangeNotified(0), mbIsInertial(false), mbIMU_BA1(false), mbIMU_BA2(false)
 {
@@ -57,11 +59,22 @@ Map::~Map()
     mvpKeyFrameOrigins.clear();
 }
 
+void Map::SetLogger(std::shared_ptr<spdlog::logger> logger)
+{
+    if (!logger) throw std::invalid_argument("Map logger must not be null");
+    mLogger = std::move(logger);
+}
+
+const std::shared_ptr<spdlog::logger> &Map::GetLogger() const
+{
+    return mLogger;
+}
+
 void Map::AddKeyFrame(KeyFrame *pKF)
 {
     unique_lock<mutex> lock(mMutexMap);
     if(mspKeyFrames.empty()){
-        cout << "First KF:" << pKF->mnId << "; Map init KF:" << mnInitKFid << endl;
+        Log(mLogger, spdlog::level::info, "First KF:{}; Map init KF:{}", pKF->mnId, mnInitKFid);
         mnInitKFid = pKF->mnId;
         mpKFinitial = pKF;
         mpKFlowerID = pKF;

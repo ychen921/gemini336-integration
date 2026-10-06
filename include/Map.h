@@ -20,6 +20,7 @@
 #ifndef MAP_H
 #define MAP_H
 
+#include "Logging.h"
 #include "MapPoint.h"
 #include "KeyFrame.h"
 
@@ -70,8 +71,13 @@ class Map
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     Map();
-    Map(int initKFid);
+    Map(int initKFid, std::shared_ptr<spdlog::logger> logger = {});
     ~Map();
+
+    // Setup/deserialization only, before the map is exposed to any worker.
+    // Logger handles are intentionally absent from serialize().
+    void SetLogger(std::shared_ptr<spdlog::logger> logger);
+    const std::shared_ptr<spdlog::logger> &GetLogger() const;
 
     void AddKeyFrame(KeyFrame* pKF);
     void AddMapPoint(MapPoint* pMP);
@@ -156,6 +162,8 @@ public:
     std::set<long unsigned int> msFixedKFs;
 
 protected:
+
+    std::shared_ptr<spdlog::logger> mLogger;
 
     long unsigned int mnId;
 
