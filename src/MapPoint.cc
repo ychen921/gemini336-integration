@@ -31,7 +31,7 @@ MapPoint::MapPoint():
     mnFirstKFid(0), mnFirstFrame(0), nObs(0), mnTrackReferenceForFrame(0),
     mnLastFrameSeen(0), mnBALocalForKF(0), mnFuseCandidateForKF(0), mnLoopPointForKF(0), mnCorrectedByKF(0),
     mnCorrectedReference(0), mnBAGlobalForKF(0), mnVisible(1), mnFound(1), mbBad(false),
-    mpReplaced(static_cast<MapPoint*>(NULL))
+    mpReplaced(static_cast<MapPoint*>(NULL)), mpMap(nullptr)
 {
     mpReplaced = static_cast<MapPoint*>(NULL);
 }
@@ -547,13 +547,14 @@ int MapPoint::PredictScale(const float &currentDist, Frame* pF)
 
 void MapPoint::PrintObservations()
 {
-    cout << "MP_OBS: MP " << mnId << endl;
+    Map* diagnosticMap = GetMap();
+    LogMapStream(diagnosticMap ? diagnosticMap->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "MP_OBS: MP " << mnId << endl; });
     for(map<KeyFrame*,tuple<int,int>>::iterator mit=mObservations.begin(), mend=mObservations.end(); mit!=mend; mit++)
     {
         KeyFrame* pKFi = mit->first;
         tuple<int,int> indexes = mit->second;
         int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
-        cout << "--OBS in KF " << pKFi->mnId << " in map " << pKFi->GetMap()->GetId() << endl;
+        LogMapStream(diagnosticMap ? diagnosticMap->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "--OBS in KF " << pKFi->mnId << " in map " << pKFi->GetMap()->GetId() << endl; });
     }
 }
 
@@ -604,7 +605,8 @@ void MapPoint::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsi
     mpRefKF = mpKFid[mBackupRefKFId];
     if(!mpRefKF)
     {
-        cout << "ERROR: MP without KF reference " << mBackupRefKFId << "; Num obs: " << nObs << endl;
+        Map* map = GetMap();
+        LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::err, [&](std::ostream &report) { report << "ERROR: MP without KF reference " << mBackupRefKFId << "; Num obs: " << nObs << endl; });
     }
     mpReplaced = static_cast<MapPoint*>(NULL);
     if(mBackupReplacedId>=0)

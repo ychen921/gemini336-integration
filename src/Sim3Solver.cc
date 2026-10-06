@@ -377,7 +377,10 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
         double cvnom = Converter::toCvMat(Pr1).dot(Converter::toCvMat(P3));
         double nom = (Pr1.array() * P3.array()).sum();
         if (abs(nom-cvnom)>1e-3)
-            std::cout << "sim3 solver: " << abs(nom-cvnom) << std::endl << nom << std::endl;
+        {
+            Map* map = mpKF1->GetMap();
+            LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "sim3 solver: " << abs(nom-cvnom) << std::endl << nom << std::endl; });
+        }
         Eigen::Array<float,3,3> aux_P3;
         aux_P3 = P3.array() * P3.array();
         double den = aux_P3.sum();

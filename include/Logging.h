@@ -80,4 +80,21 @@ inline void LogStream(const std::shared_ptr<spdlog::logger> &logger,
         Log(logger, spdlog::level::err, "Logging report formatting failed");
     }
 }
+
+// Data-object diagnostics reuse their current Map logger. Unbound objects have
+// a local console fallback, without adding logger state to serialized objects.
+template<typename Writer>
+inline void LogMapStream(std::shared_ptr<spdlog::logger> logger,
+                         spdlog::level::level_enum level, Writer &&writer) noexcept
+{
+    try
+    {
+        if (!logger) logger = GetModuleLogger(MakeLoggerFactory({}), "map");
+        LogStream(logger, level, std::forward<Writer>(writer));
+    }
+    catch (...)
+    {
+        std::fprintf(stderr, "ORB-SLAM3 logging failed\n");
+    }
+}
 } // namespace ORB_SLAM3

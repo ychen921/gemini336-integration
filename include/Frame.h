@@ -32,6 +32,7 @@
 
 #include "Converter.h"
 #include "Settings.h"
+#include "Logging.h"
 
 #include <mutex>
 #include <opencv2/opencv.hpp>
@@ -354,7 +355,7 @@ public:
 
     cv::Mat imgLeft, imgRight;
 
-    void PrintPointDistribution(){
+    void PrintPointDistribution(std::shared_ptr<spdlog::logger> logger = {}){
         int left = 0, right = 0;
         int Nlim = (Nleft != -1) ? Nleft : N;
         for(int i = 0; i < N; i++){
@@ -363,7 +364,7 @@ public:
                 else right++;
             }
         }
-        cout << "Point distribution in Frame: left-> " << left << " --- right-> " << right << endl;
+        LogMapStream(std::move(logger), spdlog::level::debug, [&](std::ostream &report) { report << "Point distribution in Frame: left-> " << left << " --- right-> " << right << endl; });
     }
 
     Sophus::SE3<double> T_test;

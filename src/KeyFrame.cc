@@ -36,7 +36,7 @@ KeyFrame::KeyFrame():
         mvuRight(static_cast<vector<float> >(NULL)), mvDepth(static_cast<vector<float> >(NULL)), mnScaleLevels(0), mfScaleFactor(0),
         mfLogScaleFactor(0), mvScaleFactors(0), mvLevelSigma2(0), mvInvLevelSigma2(0), mnMinX(0), mnMinY(0), mnMaxX(0),
         mnMaxY(0), mPrevKF(static_cast<KeyFrame*>(NULL)), mNextKF(static_cast<KeyFrame*>(NULL)), mbFirstConnection(true), mpParent(NULL), mbNotErase(false),
-        mbToBeErased(false), mbBad(false), mHalfBaseline(0), mbCurrentPlaceRecognition(false), mnMergeCorrectedForKF(0),
+        mbToBeErased(false), mbBad(false), mHalfBaseline(0), mpMap(nullptr), mbCurrentPlaceRecognition(false), mnMergeCorrectedForKF(0),
         NLeft(0),NRight(0), mnNumberOfOpt(0), mbHasVelocity(false)
 {
 
@@ -422,12 +422,13 @@ void KeyFrame::UpdateConnections(bool upParent)
 
     vector<pair<int,KeyFrame*> > vPairs;
     vPairs.reserve(KFcounter.size());
+    Map* diagnosticMap = !upParent ? GetMap() : nullptr;
     if(!upParent)
-        cout << "UPDATE_CONN: current KF " << mnId << endl;
+        LogMapStream(diagnosticMap ? diagnosticMap->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "UPDATE_CONN: current KF " << mnId << endl; });
     for(map<KeyFrame*,int>::iterator mit=KFcounter.begin(), mend=KFcounter.end(); mit!=mend; mit++)
     {
         if(!upParent)
-            cout << "  UPDATE_CONN: KF " << mit->first->mnId << " ; num matches: " << mit->second << endl;
+            LogMapStream(diagnosticMap ? diagnosticMap->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "  UPDATE_CONN: KF " << mit->first->mnId << " ; num matches: " << mit->second << endl; });
         if(mit->second>nmax)
         {
             nmax=mit->second;
@@ -487,10 +488,12 @@ void KeyFrame::EraseChild(KeyFrame *pKF)
 
 void KeyFrame::ChangeParent(KeyFrame *pKF)
 {
+    // Read Map before taking the connection lock; logging must not nest Map locks.
+    Map* diagnosticMap = pKF == this ? GetMap() : nullptr;
     unique_lock<mutex> lockCon(mMutexConnections);
     if(pKF == this)
     {
-        cout << "ERROR: Change parent KF, the parent and child are the same KF" << endl;
+        LogMapStream(diagnosticMap ? diagnosticMap->GetLogger() : nullptr, spdlog::level::err, [&](std::ostream &report) { report << "ERROR: Change parent KF, the parent and child are the same KF" << endl; });
         throw std::invalid_argument("The parent and child can not be the same");
     }
 
@@ -980,7 +983,8 @@ void KeyFrame::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsi
     }
     else
     {
-        cout << "ERROR: There is not a main camera in KF " << mnId << endl;
+        Map* map = GetMap();
+        LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::err, [&](std::ostream &report) { report << "ERROR: There is not a main camera in KF " << mnId << endl; });
     }
     if(mnBackupIdCamera2 >= 0)
     {
@@ -1023,7 +1027,8 @@ bool KeyFrame::ProjectPointDistort(MapPoint* pMP, cv::Point2f &kp, float &u, flo
     // Check positive depth
     if(PcZ<0.0f)
     {
-        cout << "Negative depth: " << PcZ << endl;
+        Map* map = GetMap();
+        LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "Negative depth: " << PcZ << endl; });
         return false;
     }
 
@@ -1086,7 +1091,8 @@ bool KeyFrame::ProjectPointUnDistort(MapPoint* pMP, cv::Point2f &kp, float &u, f
     // Check positive depth
     if(PcZ<0.0f)
     {
-        cout << "Negative depth: " << PcZ << endl;
+        Map* map = GetMap();
+        LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "Negative depth: " << PcZ << endl; });
         return false;
     }
 
@@ -1154,6 +1160,19 @@ void KeyFrame::SetORBVocabulary(ORBVocabulary* pORBVoc)
 void KeyFrame::SetKeyFrameDatabase(KeyFrameDatabase* pKFDB)
 {
     mpKeyFrameDB = pKFDB;
+}
+
+void KeyFrame::PrintPointDistribution(){
+    int left = 0, right = 0;
+    int Nlim = (NLeft != -1) ? NLeft : N;
+    for(int i = 0; i < N; i++){
+        if(mvpMapPoints[i]){
+            if(i < Nlim) left++;
+            else right++;
+        }
+    }
+    Map* map = GetMap();
+    LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "Point distribution in KeyFrame: left-> " << left << " --- right-> " << right << endl; });
 }
 
 } //namespace ORB_SLAM

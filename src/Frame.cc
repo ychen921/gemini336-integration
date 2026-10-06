@@ -600,7 +600,8 @@ bool Frame::ProjectPointDistort(MapPoint* pMP, cv::Point2f &kp, float &u, float 
     // Check positive depth
     if(PcZ<0.0f)
     {
-        cout << "Negative depth: " << PcZ << endl;
+        Map* map = pMP->GetMap();
+        LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "Negative depth: " << PcZ << endl; });
         return false;
     }
 
