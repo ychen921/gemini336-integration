@@ -30,6 +30,7 @@ MESSAGE(${OpenCV_VERSION})
 
 find_package(Eigen3 3.1.0 REQUIRED)
 find_package(Pangolin REQUIRED)
+find_package(spdlog REQUIRED)
 find_package(realsense2)
 
 include_directories(
@@ -102,6 +103,9 @@ include/TwoViewReconstruction.h
 include/SerializationUtils.h
 include/Config.h
 include/Settings.h)
+
+# Public core headers expose logger handles; propagate spdlog to core consumers.
+target_link_libraries(${PROJECT_NAME} spdlog::spdlog)
 
 add_subdirectory(Thirdparty/g2o)
 

@@ -31,6 +31,7 @@
 #include <exception>
 #include<opencv2/core/core.hpp>
 
+#include "Logging.h"
 #include "Tracking.h"
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
@@ -109,11 +110,19 @@ public:
     // System's lifetime. It only observes external stop state; it must not perform cleanup.
     // Viewer notification runs on the Viewer thread, must not wait for Shutdown,
     // and its captured resources must remain valid until that thread joins.
+    // Logger factory use is setup-only. Its session must outlive all producers;
+    // configured factory failures propagate before any worker threads launch.
     System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
            const bool bUseViewer = true, const int initFr = 0,
            const string &strSequence = std::string(),
            std::function<bool()> externalStopRequested = {},
-           std::function<void(std::exception_ptr)> viewerStopNotification = {});
+           std::function<void(std::exception_ptr)> viewerStopNotification = {},
+           LoggerFactory loggerFactory = {});
+
+    // Obtain module handles before launching their producers. Injected loggers
+    // remain usable only until the owning session is finished, after all joins.
+    std::shared_ptr<spdlog::logger> GetLogger(const std::string &module,
+                                            bool synchronous = false) const;
 
     // Proccess the given stereo frame. Images must be synchronized and rectified.
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
@@ -217,6 +226,10 @@ private:
     bool LoadAtlas(int type);
 
     string CalculateCheckSum(string filename, int type);
+
+    // Logging is ready before the constructor emits messages or starts workers.
+    LoggerFactory mLoggerFactory;
+    std::shared_ptr<spdlog::logger> mLogger;
 
     // Input sensor
     eSensor mSensor;

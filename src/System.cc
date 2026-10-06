@@ -42,7 +42,10 @@ Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence,
                std::function<bool()> externalStopRequested,
-               std::function<void(std::exception_ptr)> viewerStopNotification):
+               std::function<void(std::exception_ptr)> viewerStopNotification,
+               LoggerFactory loggerFactory):
+    mLoggerFactory(MakeLoggerFactory(std::move(loggerFactory))),
+    mLogger(GetModuleLogger(mLoggerFactory, "system")),
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false),
     mExternalStopRequested(std::move(externalStopRequested)),
@@ -547,6 +550,12 @@ void System::NotifyViewerStop(bool saveTrajectory, std::exception_ptr error) noe
     }
 }
 
+std::shared_ptr<spdlog::logger> System::GetLogger(const std::string &module,
+                                                bool synchronous) const
+{
+    return GetModuleLogger(mLoggerFactory, module, synchronous);
+}
+
 void System::Shutdown()
 {
     RequestShutdown();
@@ -558,7 +567,7 @@ void System::Shutdown()
         mbShutDown = true;
     }
 
-    cout << "Shutdown" << endl;
+    Log(mLogger, spdlog::level::info, "Shutdown");
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
