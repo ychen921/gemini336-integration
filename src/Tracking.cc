@@ -2653,7 +2653,7 @@ void Tracking::CreateInitialMapMonocular()
 
     // Bundle Adjustment
     LogStream(mLogger, spdlog::level::info, [&](std::ostream &report) { report << "New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points"; });
-    Optimizer::GlobalBundleAdjustemnt(mpAtlas->GetCurrentMap(),20);
+    Optimizer::GlobalBundleAdjustemnt(mpAtlas->GetCurrentMap(),20, NULL, 0, true, mLogger);
 
     float medianDepth = pKFini->ComputeSceneMedianDepth(2);
     float invMedianDepth;
@@ -3062,7 +3062,7 @@ bool Tracking::TrackLocalMap()
             if(!mbMapUpdated) //  && (mnMatchesInliers>30))
             {
                 Log(mLogger, spdlog::level::debug, "{}", "TLM: PoseInertialOptimizationLastFrame ");
-                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame, false, mLogger); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
             }
             else
             {
