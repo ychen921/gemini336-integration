@@ -63,10 +63,14 @@ public:
     static eLevel th;
 
 public:
-    static void PrintMess(std::string str, eLevel lev)
+    static void PrintMess(std::string str, eLevel lev,
+                          std::shared_ptr<spdlog::logger> logger = {})
     {
+        // Retain the legacy threshold before applying the session log level.
         if(lev <= th)
-            cout << str << endl;
+            LogStreamWithFallback(std::move(logger), "system",
+                lev <= VERBOSITY_NORMAL ? spdlog::level::info : spdlog::level::debug,
+                [&](std::ostream &report) { report << str << endl; });
     }
 
     static void SetTh(eLevel _th)

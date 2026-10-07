@@ -81,20 +81,29 @@ inline void LogStream(const std::shared_ptr<spdlog::logger> &logger,
     }
 }
 
-// Data-object diagnostics reuse their current Map logger. Unbound objects have
-// a local console fallback, without adding logger state to serialized objects.
+// Optional diagnostic loggers keep standalone utilities usable without global
+// logger state. Configured callers reuse the same session sink and module.
 template<typename Writer>
-inline void LogMapStream(std::shared_ptr<spdlog::logger> logger,
-                         spdlog::level::level_enum level, Writer &&writer) noexcept
+inline void LogStreamWithFallback(std::shared_ptr<spdlog::logger> logger,
+                                  const char *module,
+                                  spdlog::level::level_enum level, Writer &&writer) noexcept
 {
     try
     {
-        if (!logger) logger = GetModuleLogger(MakeLoggerFactory({}), "map");
+        if (!logger) logger = GetModuleLogger(MakeLoggerFactory({}), module);
         LogStream(logger, level, std::forward<Writer>(writer));
     }
     catch (...)
     {
         std::fprintf(stderr, "ORB-SLAM3 logging failed\n");
     }
+}
+
+// Data-object callers retain their Map fallback and need no logger members.
+template<typename Writer>
+inline void LogMapStream(std::shared_ptr<spdlog::logger> logger,
+                         spdlog::level::level_enum level, Writer &&writer) noexcept
+{
+    LogStreamWithFallback(std::move(logger), "map", level, std::forward<Writer>(writer));
 }
 } // namespace ORB_SLAM3

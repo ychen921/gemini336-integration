@@ -30,6 +30,7 @@
 #include <mutex>
 
 #include "SerializationUtils.h"
+#include "Logging.h"
 
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/vector.hpp>
@@ -199,12 +200,14 @@ public:
     Bias GetOriginalBias();
     Bias GetUpdatedBias();
 
-    void printMeasurements() const {
-        std::cout << "pint meas:\n";
-        for(int i=0; i<mvMeasurements.size(); i++){
-            std::cout << "meas " << mvMeasurements[i].t << std::endl;
-        }
-        std::cout << "end pint meas:\n";
+    void printMeasurements(std::shared_ptr<spdlog::logger> logger = {}) const {
+        LogStreamWithFallback(std::move(logger), "imu", spdlog::level::debug, [&](std::ostream &report) {
+            report << "pint meas:\n";
+            for(int i=0; i<mvMeasurements.size(); i++){
+                report << "meas " << mvMeasurements[i].t << std::endl;
+            }
+            report << "end pint meas:\n";
+        });
     }
 
 public:
