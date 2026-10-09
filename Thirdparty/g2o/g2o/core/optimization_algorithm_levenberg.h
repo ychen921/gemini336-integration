@@ -28,6 +28,8 @@
 #define G2O_SOLVER_LEVENBERG_H
 
 #include "optimization_algorithm_with_hessian.h"
+#include <functional>
+#include <utility>
 
 namespace g2o {
 
@@ -37,6 +39,17 @@ namespace g2o {
   class  OptimizationAlgorithmLevenberg : public OptimizationAlgorithmWithHessian
   {
     public:
+      // Optional observer supplied by the caller; the solver has no logging or
+      // ORB-SLAM3 dependency. Empty for all normal optimization instances.
+      struct TrialDiagnostic {
+        int iteration, trial;
+        double currentChi, tempChi, evaluatedChi, scale, rho, lambda, nextLambda;
+        bool linearSolveOK, accepted;
+      };
+      using TrialDiagnosticCallback = std::function<void(const TrialDiagnostic&)>;
+      void setTrialDiagnosticCallback(TrialDiagnosticCallback callback) {
+        _trialDiagnosticCallback = std::move(callback);
+      }
       /**
        * construct the Levenberg algorithm, which will use the given Solver for solving the
        * linearized system.
@@ -66,6 +79,7 @@ namespace g2o {
       int levenbergIteration() { return _levenbergIterations;}
 
     protected:
+      TrialDiagnosticCallback _trialDiagnosticCallback;
       // Levenberg parameters
       Property<int>* _maxTrialsAfterFailure;
       Property<double>* _userLambdaInit;

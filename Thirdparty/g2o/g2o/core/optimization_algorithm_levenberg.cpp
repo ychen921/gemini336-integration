@@ -100,6 +100,8 @@ namespace g2o {
     int& qmax = _levenbergIterations;
     qmax = 0;
     do {
+      const double diagnosticCurrentChi = currentChi;
+      const double diagnosticLambda = _currentLambda;
       _optimizer->push();
       if (globalStats) {
         globalStats->levenbergIterations++;
@@ -122,6 +124,7 @@ namespace g2o {
 
       _optimizer->computeActiveErrors();
       tempChi = _optimizer->activeRobustChi2();
+      const double diagnosticEvaluatedChi = tempChi;
       // cout << "tempChi: " << tempChi << endl;
       if (! ok2)
         tempChi=std::numeric_limits<double>::max();
@@ -144,6 +147,15 @@ namespace g2o {
         _currentLambda*=_ni;
         _ni*=2;
         _optimizer->pop(); // restore the last state before trying to optimize
+      }
+      if (_trialDiagnosticCallback) {
+        // Observers must not change optimization or propagate logging failures.
+        try {
+          _trialDiagnosticCallback({iteration, qmax, diagnosticCurrentChi,
+              tempChi, diagnosticEvaluatedChi, scale, rho, diagnosticLambda,
+              _currentLambda, ok2, rho>0 && g2o_isfinite(tempChi)});
+        } catch (...) {
+        }
       }
       qmax++;
     } while (rho<0 && qmax < _maxTrialsAfterFailure->value() && ! _optimizer->terminate());
