@@ -24,7 +24,9 @@
 #include "Optimizer.h"
 #include "ORBmatcher.h"
 #include "G2oTypes.h"
+#include "InertialDebugLogging.h"
 
+#include <algorithm>
 #include<mutex>
 #include<thread>
 #include <utility>
@@ -263,6 +265,12 @@ void LoopClosing::RunLoop()
                         LogStream(mLogger, spdlog::level::debug, [&](std::ostream &report) { report << "phi = " << phi.transpose() << endl; });
                         if (fabs(phi(0))<0.008f && fabs(phi(1))<0.008f && fabs(phi(2))<0.349f)
                         {
+                            // Preserve the accepted estimate before the yaw-only constraint.
+                            const Eigen::Vector3d translation = g2oSww_new.translation();
+                            Log(mLogger, spdlog::level::info,
+                                "EVENT=LOOP_ACCEPT KF={} MATCH_KF={} MAP={} PHI_X={} PHI_Y={} PHI_Z={} TX={} TY={} TZ={} SCALE={}",
+                                mpCurrentKF->mnId, mpLoopMatchedKF->mnId, mpCurrentKF->GetMap()->GetId(),
+                                phi.x(), phi.y(), phi.z(), translation.x(), translation.y(), translation.z(), g2oSww_new.scale());
                             if(mpCurrentKF->GetMap()->IsInertial())
                             {
                                 // If inertial, force only yaw
@@ -279,6 +287,11 @@ void LoopClosing::RunLoop()
                         }
                         else
                         {
+                            const Eigen::Vector3d translation = g2oSww_new.translation();
+                            Log(mLogger, spdlog::level::warn,
+                                "EVENT=LOOP_REJECT KF={} MATCH_KF={} MAP={} PHI_X={} PHI_Y={} PHI_Z={} TX={} TY={} TZ={} SCALE={}",
+                                mpCurrentKF->mnId, mpLoopMatchedKF->mnId, mpCurrentKF->GetMap()->GetId(),
+                                phi.x(), phi.y(), phi.z(), translation.x(), translation.y(), translation.z(), g2oSww_new.scale());
                             Log(mLogger, spdlog::level::warn, "{}", "BAD LOOP!!!");
                             bGoodLoop = false;
                         }
@@ -1063,6 +1076,10 @@ int LoopClosing::FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatche
 void LoopClosing::CorrectLoop()
 {
     //cout << "Loop detected!" << endl;
+    Log(mLogger, spdlog::level::info, "EVENT=LC_ENTER KF={} MATCH_KF={} MAP={}",
+        mpCurrentKF->mnId, mpLoopMatchedKF->mnId, mpCurrentKF->GetMap()->GetId());
+    InertialDebugLogging::LogKeyFrameState(mLogger, "LC_ENTER", mpCurrentKF, mpCurrentKF->mnId);
+    InertialDebugLogging::LogKeyFrameState(mLogger, "LC_ENTER", mpLoopMatchedKF, mpCurrentKF->mnId);
 
     // Drain/invalidate the old GBA before pausing mapping or changing its map.
     // Joining after RequestStop could strand a GBA that also needs mapping to stop.
@@ -1081,6 +1098,10 @@ void LoopClosing::CorrectLoop()
     mpLocalMapper->RethrowFailure();
 
     // Ensure current keyframe is updated
+    Log(mLogger, spdlog::level::info, "EVENT=LC_LM_STOPPED LOOP_KF={} STOPPED={} FINISHED={}",
+        mpCurrentKF->mnId, mpLocalMapper->isStopped(), mpLocalMapper->isFinished());
+    InertialDebugLogging::LogKeyFrameState(mLogger, "LC_LM_STOPPED", mpCurrentKF, mpCurrentKF->mnId);
+    InertialDebugLogging::LogKeyFrameState(mLogger, "LC_LM_STOPPED", mpLoopMatchedKF, mpCurrentKF->mnId);
     //cout << "Start updating connections" << endl;
     //assert(mpCurrentKF->GetMap()->CheckEssentialGraph());
     mpCurrentKF->UpdateConnections();
@@ -1279,6 +1300,10 @@ void LoopClosing::CorrectLoop()
 
     // Release our pause before launching GBA, so Release cannot overwrite a stop
     // request made by a fast GBA that has already reached its map-update phase.
+    InertialDebugLogging::LogKeyFrameState(mLogger, "LC_CORRECTION_DONE", mpCurrentKF, mpCurrentKF->mnId);
+    InertialDebugLogging::LogKeyFrameState(mLogger, "LC_CORRECTION_DONE", mpLoopMatchedKF, mpCurrentKF->mnId);
+    Log(mLogger, spdlog::level::info, "EVENT=LC_LM_RELEASE LOOP_KF={} MAP={}",
+        mpCurrentKF->mnId, pLoopMap->GetId());
     mpLocalMapper->Release();
 
     // Launch a new thread to perform Global Bundle Adjustment (Only if few keyframes, if not it would take too much time)
@@ -2360,10 +2385,46 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
 
     const bool bImuInit = pActiveMap->isImuInitialized();
 
+    Log(mLogger, spdlog::level::info, "EVENT=GBA_START LOOP_KF={} MAP={} GENERATION={} IMU_INIT={}",
+        nLoopKF, pActiveMap->GetId(), generation, bImuInit);
+
+    // Keep the same bounded sample across optimization and application. Use
+    // launch IDs rather than the loop thread's mutable current/matched pointers.
+    vector<KeyFrame*> debugKeyFrames;
+    if(mLogger->should_log(spdlog::level::debug))
+    {
+        vector<KeyFrame*> candidates = pActiveMap->GetAllKeyFrames();
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+            [](KeyFrame* keyframe) { return !keyframe || keyframe->isBad(); }), candidates.end());
+        std::sort(candidates.begin(), candidates.end(),
+            [](KeyFrame* lhs, KeyFrame* rhs) { return lhs->mnId < rhs->mnId; });
+        for(KeyFrame* keyframe : candidates)
+        {
+            if(keyframe->mnId == nLoopKF)
+                debugKeyFrames.push_back(keyframe);
+        }
+        const size_t sampleCount = std::min<size_t>(5, candidates.size());
+        for(size_t i = 0; i < sampleCount; ++i)
+        {
+            const size_t index = sampleCount > 1 ? i * (candidates.size() - 1) / (sampleCount - 1) : 0;
+            KeyFrame* keyframe = candidates[index];
+            if(std::find(debugKeyFrames.begin(), debugKeyFrames.end(), keyframe) == debugKeyFrames.end())
+                debugKeyFrames.push_back(keyframe);
+        }
+    }
+
     if(!bImuInit)
         Optimizer::GlobalBundleAdjustemnt(pActiveMap,10,nullptr,nLoopKF,false, mLogger);
     else
-        Optimizer::FullInertialBA(pActiveMap,7,false,nLoopKF,nullptr, false, 1e2, 1e6, NULL, NULL, mLogger);
+        Optimizer::FullInertialBA(pActiveMap,7,false,nLoopKF,nullptr, false, 1e2, 1e6, NULL, NULL, mLogger, generation);
+
+    Log(mLogger, spdlog::level::info, "EVENT=GBA_OPT_DONE LOOP_KF={} MAP={} GENERATION={}",
+        nLoopKF, pActiveMap->GetId(), generation);
+    for(KeyFrame* keyframe : debugKeyFrames)
+    {
+        InertialDebugLogging::LogKeyFrameState(mLogger, "GBA_OPT_DONE", keyframe, nLoopKF, "CUR_");
+        InertialDebugLogging::LogGBAState(mLogger, "GBA_OPT_DONE", keyframe, nLoopKF, bImuInit);
+    }
 
 #ifdef REGISTER_TIMES
     std::chrono::steady_clock::time_point time_EndGBA = std::chrono::steady_clock::now();
@@ -2406,6 +2467,8 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
             // Get Map Mutex
             unique_lock<mutex> lock(pActiveMap->mMutexMapUpdate);
             // cout << "LC: Update Map Mutex adquired" << endl;
+            Log(mLogger, spdlog::level::info, "EVENT=GBA_APPLY_BEGIN LOOP_KF={} MAP={} GENERATION={}",
+                nLoopKF, pActiveMap->GetId(), generation);
 
             //pActiveMap->PrintEssentialGraph();
             // Correct keyframes starting at map first keyframe
@@ -2454,6 +2517,12 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
                 }
 
                 //cout << "-------Update pose" << endl;
+                const bool logDebugState = std::find(debugKeyFrames.begin(), debugKeyFrames.end(), pKF) != debugKeyFrames.end();
+                if(logDebugState)
+                {
+                    InertialDebugLogging::LogKeyFrameState(mLogger, "GBA_APPLY_BEFORE", pKF, nLoopKF, "CUR_");
+                    InertialDebugLogging::LogGBAState(mLogger, "GBA_APPLY_BEFORE", pKF, nLoopKF, bImuInit);
+                }
                 pKF->mTcwBefGBA = pKF->GetPose();
                 //cout << "pKF->mTcwBefGBA: " << pKF->mTcwBefGBA << endl;
                 pKF->SetPose(pKF->mTcwGBA);
@@ -2523,6 +2592,8 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
                     pKF->SetNewBias(pKF->mBiasGBA);                    
                 }
 
+                if(logDebugState)
+                    InertialDebugLogging::LogKeyFrameState(mLogger, "GBA_APPLY_AFTER", pKF, nLoopKF);
                 lpKFtoCheck.pop_front();
             }
 
@@ -2569,6 +2640,11 @@ void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoop
             // TODO Check this update
             // mpTracker->UpdateFrameIMU(1.0f, mpTracker->GetLastKeyFrame()->GetImuBias(), mpTracker->GetLastKeyFrame());
 
+            for(KeyFrame* keyframe : debugKeyFrames)
+                InertialDebugLogging::LogKeyFrameState(mLogger, "GBA_APPLY_END", keyframe, nLoopKF);
+            Log(mLogger, spdlog::level::info, "EVENT=GBA_APPLY_END LOOP_KF={} MAP={} GENERATION={}",
+                nLoopKF, pActiveMap->GetId(), generation);
+            Log(mLogger, spdlog::level::info, "EVENT=GBA_LM_RELEASE LOOP_KF={} MAP={}", nLoopKF, pActiveMap->GetId());
             mpLocalMapper->Release();
 
 #ifdef REGISTER_TIMES

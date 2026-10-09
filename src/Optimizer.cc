@@ -21,6 +21,10 @@
 
 
 #include <complex>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <memory>
 
 #include <Eigen/StdVector>
 #include <Eigen/Dense>
@@ -35,6 +39,7 @@
 #include "Thirdparty/g2o/g2o/core/robust_kernel_impl.h"
 #include "Thirdparty/g2o/g2o/solvers/linear_solver_dense.h"
 #include "G2oTypes.h"
+#include "GBADiagnosticStatistics.h"
 #include "Converter.h"
 
 #include<mutex>
@@ -51,6 +56,140 @@ bool sortByVal(const pair<MapPoint*, int> &a, const pair<MapPoint*, int> &b)
 
 namespace
 {
+// Read the optimizer-owned estimates, not live KF getters: mapping can update
+// those getters while the GBA graph is being built or solved.
+void LogGBAVertexState(const std::shared_ptr<spdlog::logger>& logger,
+                       const char* event, g2o::SparseOptimizer& optimizer,
+                       KeyFrame* keyframe, unsigned long maxKFid,
+                       unsigned long mapId, unsigned long loopKF,
+                       std::uint64_t generation)
+{
+    // Skip estimate reads and conversions when detailed diagnostics are disabled.
+    if(!logger->should_log(spdlog::level::debug))
+        return;
+    const VertexPose* pose = static_cast<VertexPose*>(optimizer.vertex(keyframe->mnId));
+    if(!pose)
+        return;
+
+    const ImuCamPose& estimate = pose->estimate();
+    // Estimates can retain float precision after promotion to double. The
+    // quaternion constructor normalizes local copies without the stricter
+    // double matrix orthogonality check; optimizer estimates remain untouched.
+    const Eigen::Vector3d position = -estimate.Rcw[0].transpose() * estimate.tcw[0];
+    const Sophus::SO3d cameraRotation{Eigen::Quaterniond(estimate.Rcw[0])};
+    const Sophus::SO3d bodyOrientation{Eigen::Quaterniond(estimate.Rwb)};
+    const Eigen::Vector3d rotation = cameraRotation.inverse().log();
+    const Eigen::Vector3d bodyRotation = bodyOrientation.log();
+    const VertexVelocity* velocity = keyframe->bImu ? static_cast<VertexVelocity*>(optimizer.vertex(maxKFid + 3 * keyframe->mnId + 1)) : nullptr;
+    const VertexGyroBias* gyro = keyframe->bImu ? static_cast<VertexGyroBias*>(optimizer.vertex(maxKFid + 3 * keyframe->mnId + 2)) : nullptr;
+    const VertexAccBias* accel = keyframe->bImu ? static_cast<VertexAccBias*>(optimizer.vertex(maxKFid + 3 * keyframe->mnId + 3)) : nullptr;
+    const bool hasInertialState = keyframe->bImu && velocity && gyro && accel;
+    Eigen::Vector3d v = Eigen::Vector3d::Zero();
+    Eigen::Vector3d bg = Eigen::Vector3d::Zero();
+    Eigen::Vector3d ba = Eigen::Vector3d::Zero();
+    if(hasInertialState)
+    {
+        v = velocity->estimate();
+        bg = gyro->estimate();
+        ba = accel->estimate();
+    }
+
+    Log(logger, spdlog::level::debug,
+        "EVENT={} MAP={} LOOP_KF={} GENERATION={} KF={} TIMESTAMP={:.6f} "
+        "SOURCE=OPTIMIZER_VERTEX POSE_FRAME=Twc VELOCITY_FRAME=WORLD FIXED_POSE={} HAS_INERTIAL_STATE={} "
+        "PX={} PY={} PZ={} RX={} RY={} RZ={} "
+        "BODY_POSE_FRAME=Twb BODY_PX={} BODY_PY={} BODY_PZ={} BODY_RX={} BODY_RY={} BODY_RZ={} "
+        "VX={} VY={} VZ={} VNORM={} BGX={} BGY={} BGZ={} BAX={} BAY={} BAZ={}",
+        event, mapId, loopKF, generation, keyframe->mnId, keyframe->mTimeStamp,
+        pose->fixed(), hasInertialState,
+        position.x(), position.y(), position.z(), rotation.x(), rotation.y(), rotation.z(),
+        estimate.twb.x(), estimate.twb.y(), estimate.twb.z(), bodyRotation.x(), bodyRotation.y(), bodyRotation.z(),
+        v.x(), v.y(), v.z(), v.norm(), bg.x(), bg.y(), bg.z(), ba.x(), ba.y(), ba.z());
+}
+
+struct GBAPreintegrationWatches
+{
+    struct Entry
+    {
+        EdgeInertial* edge;
+        IMU::Preintegrated* source;
+        std::shared_ptr<IMU::Preintegrated::DiagnosticContext> context;
+        IMU::Preintegrated::DiagnosticSnapshot previous;
+        IMU::Preintegrated::DiagnosticSnapshot previousSource;
+    };
+    vector<Entry> entries;
+    ~GBAPreintegrationWatches()
+    {
+        // No preintegration dereference during teardown. A mutator may have
+        // copied the context, so publication also makes that copy inactive.
+        for(const Entry& entry : entries)
+            entry.context->active.store(false, std::memory_order_release);
+    }
+};
+
+bool CheckGBAPreintegration(GBAPreintegrationWatches& watches, const char* phase, bool emitSnapshot)
+{
+    bool stable = true;
+    for(GBAPreintegrationWatches::Entry& entry : watches.entries)
+    {
+        const IMU::Preintegrated::DiagnosticSnapshot current = entry.edge->mpInt->GetDiagnosticSnapshot();
+        const IMU::Preintegrated::DiagnosticSnapshot source = entry.source->GetDiagnosticSnapshot();
+        const auto& context = *entry.context;
+        const auto logChange = [&](const IMU::Preintegrated::DiagnosticSnapshot& before,
+                                   const IMU::Preintegrated::DiagnosticSnapshot& after,
+                                   const char* role, spdlog::level::level_enum level) {
+            if(after.revision == before.revision)
+                return false;
+            Log(context.logger, level,
+                "EVENT=GBA_PREINT_CHANGED PHASE={} MAP={} LOOP_KF={} GENERATION={} KF={} PREV_KF={} ROLE={} "
+                "OBJECT={} SOURCE_OBJECT={} EDGE_OBJECT={} "
+                "REV_BEFORE={} REV_AFTER={} MEASUREMENTS_BEFORE={} MEASUREMENTS_AFTER={} DT_BEFORE={} DT_AFTER={} EDGE_DT={}",
+                phase, context.map, context.loop_kf, context.generation, context.kf, context.previous_kf, role,
+                after.object, source.object, current.object, before.revision, after.revision,
+                before.measurements, after.measurements, before.dt, after.dt, entry.edge->dt);
+            return true;
+        };
+        // Mapping may still merge the source. Only a change to the object used
+        // by the edge invalidates the objective's measurement-stability flag.
+        if(logChange(entry.previous, current, "EDGE", spdlog::level::warn))
+            stable = false;
+        logChange(entry.previousSource, source, "SOURCE", spdlog::level::debug);
+        if(emitSnapshot)
+            Log(context.logger, spdlog::level::debug,
+                "EVENT=GBA_PREINT_SNAPSHOT PHASE={} MAP={} LOOP_KF={} GENERATION={} KF={} PREV_KF={} "
+                "OBJECT={} REV={} BIAS_REV={} MEASUREMENTS={} DT={} EDGE_DT={} "
+                "SOURCE_OBJECT={} SOURCE_REV={} SOURCE_MEASUREMENTS={} SOURCE_DT={}",
+                phase, context.map, context.loop_kf, context.generation, context.kf, context.previous_kf,
+                current.object, current.revision, current.bias_revision, current.measurements, current.dt, entry.edge->dt,
+                source.object, source.revision, source.measurements, source.dt);
+        entry.previous = current;
+        entry.previousSource = source;
+    }
+    return stable;
+}
+
+void LogGBAObjective(const std::shared_ptr<spdlog::logger>& logger, const char* event,
+                     const g2o::SparseOptimizer& optimizer, unsigned long map,
+                     unsigned long loopKF, std::uint64_t generation, double objective,
+                     bool measurementStable, bool activeEdgesStable)
+{
+    const GBADiagnostics::ObjectiveBreakdown breakdown = GBADiagnostics::SummarizeObjective(optimizer);
+    const char* names[] = {"VISUAL_MONO", "VISUAL_STEREO", "IMU", "GYRO_RW", "ACCEL_RW", "OTHER"};
+    for(size_t i = 0; i < breakdown.categories.size(); ++i)
+    {
+        const auto& category = breakdown.categories[i];
+        Log(logger, spdlog::level::debug,
+            "EVENT={} MAP={} LOOP_KF={} GENERATION={} CATEGORY={} COUNT={} RAW_CHI2={} ROBUST_CHI2={} NONFINITE_EDGES={}",
+            event, map, loopKF, generation, names[i], category.count, category.raw, category.robust, category.nonfinite);
+    }
+    const bool sumMatches = GBADiagnostics::ObjectiveSumMatches(breakdown.robust_sum, objective);
+    Log(logger, sumMatches && measurementStable && activeEdgesStable ? spdlog::level::debug : spdlog::level::warn,
+        "EVENT={} MAP={} LOOP_KF={} GENERATION={} CATEGORY=TOTAL ACTIVE_EDGES={} ROBUST_SUM={} "
+        "ACTIVE_ROBUST_CHI2={} SUM_MATCH={} MEASUREMENT_STABLE={} ACTIVE_EDGES_STABLE={}",
+        event, map, loopKF, generation, optimizer.activeEdges().size(), breakdown.robust_sum,
+        objective, sumMatches, measurementStable, activeEdgesStable);
+}
+
 template<typename Writer>
 void LogOptimizer(std::shared_ptr<spdlog::logger> &logger,
                   spdlog::level::level_enum level, Writer &&writer) noexcept
@@ -410,11 +549,48 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
     }
 }
 
-void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const long unsigned int nLoopId, bool *pbStopFlag, bool bInit, float priorG, float priorA, Eigen::VectorXd *vSingVal, bool *bHess, std::shared_ptr<spdlog::logger> logger)
+void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const long unsigned int nLoopId, bool *pbStopFlag, bool bInit, float priorG, float priorA, Eigen::VectorXd *vSingVal, bool *bHess, std::shared_ptr<spdlog::logger> logger, std::uint64_t gbaGeneration)
 {
     long unsigned int maxKFid = pMap->GetMaxKFid();
     const vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
     const vector<MapPoint*> vpMPs = pMap->GetAllMapPoints();
+
+    // Sample the actual optimizer input. Detailed records are limited to loop
+    // GBA; initialization only gains context at the original missing-link site.
+    const bool logGBA = gbaGeneration != 0 && !bInit && logger && logger->should_log(spdlog::level::info);
+    // Existing logging.level controls this opt-in instrumentation. No callback,
+    // edge scans or observers are installed at info/off levels.
+    const bool detailedGBA = logGBA && logger->should_log(spdlog::level::debug);
+    // Loop GBA must own fixed measurements even with diagnostics disabled.
+    // Declare ownership before the optimizer so its edges are destroyed first.
+    const bool snapshotGBA = gbaGeneration != 0 && !bInit;
+    vector<std::unique_ptr<IMU::Preintegrated>> gbaPreintegrations;
+    GBAPreintegrationWatches preintegrationWatches;
+    vector<KeyFrame*> debugKeyFrames;
+    if(detailedGBA)
+    {
+        vector<KeyFrame*> candidates;
+        for(KeyFrame* keyframe : vpKFs)
+        {
+            if(keyframe->mnId <= maxKFid)
+                candidates.push_back(keyframe);
+        }
+        std::sort(candidates.begin(), candidates.end(),
+            [](KeyFrame* lhs, KeyFrame* rhs) { return lhs->mnId < rhs->mnId; });
+        for(KeyFrame* keyframe : candidates)
+        {
+            if(keyframe->mnId == nLoopId)
+                debugKeyFrames.push_back(keyframe);
+        }
+        const size_t sampleCount = std::min<size_t>(5, candidates.size());
+        for(size_t i = 0; i < sampleCount; ++i)
+        {
+            const size_t index = sampleCount > 1 ? i * (candidates.size() - 1) / (sampleCount - 1) : 0;
+            KeyFrame* keyframe = candidates[index];
+            if(std::find(debugKeyFrames.begin(), debugKeyFrames.end(), keyframe) == debugKeyFrames.end())
+                debugKeyFrames.push_back(keyframe);
+        }
+    }
 
     // Setup optimizer
     g2o::SparseOptimizer optimizer;
@@ -425,6 +601,23 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
     g2o::BlockSolverX * solver_ptr = new g2o::BlockSolverX(linearSolver);
 
     g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    if(detailedGBA)
+    {
+        solver->setTrialDiagnosticCallback([logger, map = pMap->GetId(), nLoopId, gbaGeneration]
+            (const g2o::OptimizationAlgorithmLevenberg::TrialDiagnostic& trial) {
+            const bool anomaly = GBADiagnostics::TrialIsAnomalous(trial);
+            Log(logger, anomaly ? spdlog::level::warn : spdlog::level::debug,
+                "EVENT={} MAP={} LOOP_KF={} GENERATION={} ITERATION={} TRIAL={} CURRENT_CHI={} TEMP_CHI={} "
+                "EVALUATED_CHI={} SCALE={} RHO={} LAMBDA={} NEXT_LAMBDA={} LINEAR_SOLVE_OK={} ACCEPTED={} "
+                "COST_INCREASE_ACCEPTED={} NONPOSITIVE_SCALE={} NONFINITE={}",
+                anomaly ? "GBA_LM_ANOMALY" : "GBA_LM_TRIAL", map, nLoopId, gbaGeneration,
+                trial.iteration, trial.trial, trial.currentChi, trial.tempChi, trial.evaluatedChi,
+                trial.scale, trial.rho, trial.lambda, trial.nextLambda, trial.linearSolveOK, trial.accepted,
+                trial.accepted && trial.evaluatedChi > trial.currentChi, trial.scale <= 0,
+                !std::isfinite(trial.currentChi) || !std::isfinite(trial.tempChi) || !std::isfinite(trial.evaluatedChi) ||
+                !std::isfinite(trial.scale) || !std::isfinite(trial.rho) || !std::isfinite(trial.lambda) || !std::isfinite(trial.nextLambda));
+        });
+    }
     solver->setUserLambdaInit(1e-5);
     optimizer.setAlgorithm(solver);
     optimizer.setVerbose(false);
@@ -433,6 +626,14 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         optimizer.setForceStopFlag(pbStopFlag);
 
     int nNonFixed = 0;
+    size_t poseCount = 0;
+    size_t fixedPoseCount = 0;
+    size_t inertialEdgeCount = 0;
+    size_t visualEdgeCount = 0;
+    size_t biasEdgeCount = 0;
+    size_t missingPrevCount = 0;
+    size_t missingVertexCount = 0;
+    size_t nonImuPairCount = 0;
 
     // Set KeyFrame vertices
     KeyFrame* pIncKF;
@@ -453,6 +654,12 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
             VP->setFixed(bFixed);
         }
         optimizer.addVertex(VP);
+        if(logGBA)
+        {
+            ++poseCount;
+            if(VP->fixed())
+                ++fixedPoseCount;
+        }
 
         if(pKFi->bImu)
         {
@@ -472,6 +679,8 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                 optimizer.addVertex(VA);
             }
         }
+        if(logGBA && std::find(debugKeyFrames.begin(), debugKeyFrames.end(), pKFi) != debugKeyFrames.end())
+            LogGBAVertexState(logger, "GBA_INPUT_KF", optimizer, pKFi, maxKFid, pMap->GetId(), nLoopId, gbaGeneration);
     }
 
     if (bInit)
@@ -500,6 +709,18 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
         if(!pKFi->mPrevKF)
         {
             LogOptimizer(logger, spdlog::level::err, [&](std::ostream &report) { report << "NOT INERTIAL LINK TO PREVIOUS FRAME!"; });
+            // An origin may legitimately lack a predecessor. Keep the original
+            // skip behavior, and distinguish that case using explicit KF IDs.
+            if(logger)
+                Log(logger, spdlog::level::warn,
+                    "EVENT=GBA_INERTIAL_LINK_INVALID MAP={} LOOP_KF={} GENERATION={} CALLER={} "
+                    "KF={} PREV_KF=NONE KF_BAD={} BIMU={} PREINT_NULL={} IS_ORIGIN={} REASON=NO_PREV_KF EDGE_ADDED=false",
+                    pMap->GetId(), nLoopId, gbaGeneration,
+                    gbaGeneration != 0 ? "LOOP_GBA" : "FULL_INERTIAL_BA",
+                    pKFi->mnId, pKFi->isBad(), pKFi->bImu, pKFi->mpImuPreintegrated == nullptr,
+                    pKFi->mnId == pMap->GetInitKFid());
+            if(logGBA)
+                ++missingPrevCount;
             continue;
         }
 
@@ -538,6 +759,8 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                     if(!VP1 || !VV1 || !VG1 || !VA1 || !VP2 || !VV2 || !VG2 || !VA2)
                     {
                         LogOptimizer(logger, spdlog::level::err, [&](std::ostream &report) { report << "Error" << VP1 << ", "<< VV1 << ", "<< VG1 << ", "<< VA1 << ", " << VP2 << ", " << VV2 <<  ", "<< VG2 << ", "<< VA2 <<endl; });
+                        if(logGBA)
+                            ++missingVertexCount;
                         continue;
                     }
                 }
@@ -546,11 +769,44 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                     if(!VP1 || !VV1 || !VG1 || !VA1 || !VP2 || !VV2)
                     {
                         LogOptimizer(logger, spdlog::level::err, [&](std::ostream &report) { report << "Error" << VP1 << ", "<< VV1 << ", "<< VG1 << ", "<< VA1 << ", " << VP2 << ", " << VV2 <<endl; });
+                        if(logGBA)
+                            ++missingVertexCount;
                         continue;
                     }
                 }
 
-                EdgeInertial* ei = new EdgeInertial(pKFi->mpImuPreintegrated);
+                IMU::Preintegrated* sourcePreintegration = pKFi->mpImuPreintegrated;
+                IMU::Preintegrated* edgePreintegration = sourcePreintegration;
+                if(snapshotGBA)
+                {
+                    // CopyFrom locks the source. All constraints for this pair
+                    // then use one private snapshot, untouched by KF culling.
+                    gbaPreintegrations.push_back(std::make_unique<IMU::Preintegrated>(sourcePreintegration));
+                    edgePreintegration = gbaPreintegrations.back().get();
+                }
+                EdgeInertial* ei = new EdgeInertial(edgePreintegration);
+                if(detailedGBA)
+                {
+                    // Identity comes from the edge itself. Endpoint IDs come
+                    // from its graph vertices, not mutable temporal KF pointers.
+                    auto context = std::make_shared<IMU::Preintegrated::DiagnosticContext>();
+                    context->logger = logger;
+                    context->map = pMap->GetId();
+                    context->loop_kf = nLoopId;
+                    context->generation = gbaGeneration;
+                    context->kf = VP2->id();
+                    context->previous_kf = VP1->id();
+                    const auto sourceSnapshot = sourcePreintegration->WatchForGBA(context);
+                    const auto snapshot = ei->mpInt->GetDiagnosticSnapshot();
+                    preintegrationWatches.entries.push_back({ei, sourcePreintegration, context, snapshot, sourceSnapshot});
+                    Log(logger, spdlog::level::debug,
+                        "EVENT=GBA_PREINT_SNAPSHOT PHASE=EDGE_BUILD MAP={} LOOP_KF={} GENERATION={} KF={} PREV_KF={} "
+                        "OBJECT={} REV={} BIAS_REV={} MEASUREMENTS={} DT={} EDGE_DT={} "
+                        "SOURCE_OBJECT={} SOURCE_REV={} SOURCE_MEASUREMENTS={} SOURCE_DT={}",
+                        context->map, nLoopId, gbaGeneration, context->kf, context->previous_kf,
+                        snapshot.object, snapshot.revision, snapshot.bias_revision, snapshot.measurements, snapshot.dt, ei->dt,
+                        sourceSnapshot.object, sourceSnapshot.revision, sourceSnapshot.measurements, sourceSnapshot.dt);
+                }
                 ei->setVertex(0,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VP1));
                 ei->setVertex(1,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VV1));
                 ei->setVertex(2,dynamic_cast<g2o::OptimizableGraph::Vertex*>(VG1));
@@ -563,28 +819,38 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                 rki->setDelta(sqrt(16.92));
 
                 optimizer.addEdge(ei);
+                if(logGBA)
+                    ++inertialEdgeCount;
 
                 if (!bInit)
                 {
                     EdgeGyroRW* egr= new EdgeGyroRW();
                     egr->setVertex(0,VG1);
                     egr->setVertex(1,VG2);
-                    Eigen::Matrix3d InfoG = pKFi->mpImuPreintegrated->C.block<3,3>(9,9).cast<double>().inverse();
+                    Eigen::Matrix3d InfoG = edgePreintegration->C.block<3,3>(9,9).cast<double>().inverse();
                     egr->setInformation(InfoG);
                     egr->computeError();
                     optimizer.addEdge(egr);
+                    if(logGBA)
+                        ++biasEdgeCount;
 
                     EdgeAccRW* ear = new EdgeAccRW();
                     ear->setVertex(0,VA1);
                     ear->setVertex(1,VA2);
-                    Eigen::Matrix3d InfoA = pKFi->mpImuPreintegrated->C.block<3,3>(12,12).cast<double>().inverse();
+                    Eigen::Matrix3d InfoA = edgePreintegration->C.block<3,3>(12,12).cast<double>().inverse();
                     ear->setInformation(InfoA);
                     ear->computeError();
                     optimizer.addEdge(ear);
+                    if(logGBA)
+                        ++biasEdgeCount;
                 }
             }
             else
+            {
                 LogOptimizer(logger, spdlog::level::err, [&](std::ostream &report) { report << pKFi->mnId << " or " << pKFi->mPrevKF->mnId << " no imu" << endl; });
+                if(logGBA)
+                    ++nonImuPairCount;
+            }
         }
     }
 
@@ -670,6 +936,8 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                     rk->setDelta(thHuberMono);
 
                     optimizer.addEdge(e);
+                    if(logGBA)
+                        ++visualEdgeCount;
                 }
                 else if(leftIndex != -1 && pKFi->mvuRight[leftIndex] >= 0) // stereo observation
                 {
@@ -697,6 +965,8 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                     rk->setDelta(thHuberStereo);
 
                     optimizer.addEdge(e);
+                    if(logGBA)
+                        ++visualEdgeCount;
                 }
 
                 if(pKFi->mpCamera2){ // Monocular right observation
@@ -727,6 +997,8 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                         rk->setDelta(thHuberMono);
 
                         optimizer.addEdge(e);
+                        if(logGBA)
+                            ++visualEdgeCount;
                     }
                 }
             }
@@ -744,8 +1016,70 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
             return;
 
 
+    if(logGBA)
+        Log(logger, spdlog::level::info,
+            "EVENT=GBA_GRAPH_SNAPSHOT MAP={} LOOP_KF={} GENERATION={} BA_TYPE=FULL_INERTIAL "
+            "MAX_KF_ID={} KF_COUNT={} MP_COUNT={} VERTICES={} EDGES={} POSE_VERTICES={} FIXED_POSES={} "
+            "VISUAL_EDGES={} IMU_EDGES={} BIAS_RW_EDGES={} MISSING_PREV_COUNT={} MISSING_VERTEX_COUNT={} NON_IMU_PAIR_COUNT={} "
+            "FIX_LOCAL={} INIT_BIASES={}",
+            pMap->GetId(), nLoopId, gbaGeneration, maxKFid, vpKFs.size(), vpMPs.size(),
+            optimizer.vertices().size(), optimizer.edges().size(), poseCount, fixedPoseCount,
+            visualEdgeCount, inertialEdgeCount, biasEdgeCount, missingPrevCount, missingVertexCount, nonImuPairCount,
+            bFixLocal, bInit);
+
     optimizer.initializeOptimization();
-    optimizer.optimize(its);
+    g2o::SparseOptimizer::EdgeContainer initialActiveEdges;
+    if(detailedGBA)
+        initialActiveEdges = optimizer.activeEdges();
+    std::chrono::steady_clock::time_point solverStart;
+    if(logGBA)
+    {
+        // Evaluate the same robust weighted objective on the same active edges
+        // at both boundaries, without adding optimization iterations.
+        if(detailedGBA)
+            CheckGBAPreintegration(preintegrationWatches, "BEFORE", true);
+        optimizer.computeActiveErrors();
+        const double initialError = optimizer.activeRobustChi2();
+        if(detailedGBA)
+        {
+            // Do not freeze mapping to make the metric look stationary. Instead
+            // verify revisions around evaluation and explicitly flag mutations.
+            const bool stable = CheckGBAPreintegration(preintegrationWatches, "BEFORE_EVALUATED", false);
+            LogGBAObjective(logger, "GBA_OBJECTIVE_BEFORE", optimizer, pMap->GetId(), nLoopId,
+                            gbaGeneration, initialError, stable, initialActiveEdges == optimizer.activeEdges());
+        }
+        Log(logger, spdlog::level::info,
+            "EVENT=GBA_SOLVER_BEGIN MAP={} LOOP_KF={} GENERATION={} ERROR_KIND=ACTIVE_ROBUST_CHI2 "
+            "INITIAL_ERROR={} ERROR_FINITE={} REQUESTED_ITERATIONS={}",
+            pMap->GetId(), nLoopId, gbaGeneration, initialError, std::isfinite(initialError), its);
+        solverStart = std::chrono::steady_clock::now();
+    }
+    const int iterations = optimizer.optimize(its);
+    if(logGBA)
+    {
+        const double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - solverStart).count();
+        if(detailedGBA)
+            CheckGBAPreintegration(preintegrationWatches, "OPTIMIZATION", true);
+        optimizer.computeActiveErrors();
+        const double finalError = optimizer.activeRobustChi2();
+        if(detailedGBA)
+        {
+            const bool stable = CheckGBAPreintegration(preintegrationWatches, "AFTER_EVALUATED", false);
+            LogGBAObjective(logger, "GBA_OBJECTIVE_AFTER", optimizer, pMap->GetId(), nLoopId,
+                            gbaGeneration, finalError, stable, initialActiveEdges == optimizer.activeEdges());
+            // Only graph build/solve is observed; applying GBA biases is not a
+            // mutation of the measurement used by this completed optimization.
+            for(const auto& entry : preintegrationWatches.entries)
+                entry.context->active.store(false, std::memory_order_release);
+        }
+        Log(logger, spdlog::level::info,
+            "EVENT=GBA_SOLVER_END MAP={} LOOP_KF={} GENERATION={} ERROR_KIND=ACTIVE_ROBUST_CHI2 "
+            "FINAL_ERROR={} ERROR_FINITE={} ITERATIONS={} ELAPSED_MS={} STOP_REQUESTED={} CONVERGED=NA",
+            pMap->GetId(), nLoopId, gbaGeneration, finalError, std::isfinite(finalError), iterations,
+            elapsedMs, pbStopFlag && *pbStopFlag);
+        for(KeyFrame* keyframe : debugKeyFrames)
+            LogGBAVertexState(logger, "GBA_OUTPUT_KF", optimizer, keyframe, maxKFid, pMap->GetId(), nLoopId, gbaGeneration);
+    }
 
 
     // Recover optimized data
