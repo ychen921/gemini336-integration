@@ -22,6 +22,9 @@
 
 #include <vector>
 #include <utility>
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <opencv2/core/core.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -171,6 +174,25 @@ class Preintegrated
 
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    // Diagnostic metadata is process-local and deliberately not serialized.
+    // A weak observer cannot extend GBA/logger lifetime after the worker exits.
+    struct DiagnosticContext
+    {
+        std::shared_ptr<spdlog::logger> logger;
+        unsigned long map = 0, loop_kf = 0, kf = 0, previous_kf = 0;
+        std::uint64_t generation = 0;
+        std::atomic<bool> active{true};
+    };
+    struct DiagnosticSnapshot
+    {
+        std::uintptr_t object = 0;
+        std::uint64_t revision = 0, bias_revision = 0;
+        std::size_t measurements = 0;
+        float dt = 0;
+    };
+    DiagnosticSnapshot GetDiagnosticSnapshot();
+    DiagnosticSnapshot WatchForGBA(const std::shared_ptr<DiagnosticContext>& context);
+
     Preintegrated(const Bias &b_, const Calib &calib);
     Preintegrated(Preintegrated* pImuPre);
     Preintegrated() {}
@@ -225,6 +247,16 @@ public:
 
 
 private:
+    // Locked public entrypoints and existing compound operations share these
+    // bodies, so instrumentation never recursively acquires mMutex.
+    void InitializeUnlocked(const Bias &bias);
+    void IntegrateNewMeasurementUnlocked(const Eigen::Vector3f &acceleration,
+                                         const Eigen::Vector3f &angular_velocity, float dt);
+    DiagnosticSnapshot DiagnosticSnapshotUnlocked() const;
+    std::uint64_t mutation_revision_ = 0;
+    std::uint64_t bias_revision_ = 0;
+    std::weak_ptr<DiagnosticContext> diagnostic_context_;
+
     // Updated bias
     Bias bu;
     // Dif between original and updated bias

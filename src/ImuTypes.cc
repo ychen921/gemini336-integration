@@ -104,6 +104,45 @@ IntegratedRotation::IntegratedRotation(const Eigen::Vector3f &angVel, const Bias
     }
 }
 
+namespace
+{
+void LogPreintegrationMutation(const std::shared_ptr<Preintegrated::DiagnosticContext>& context,
+                               const char* event, const char* path,
+                               const Preintegrated::DiagnosticSnapshot& before,
+                               const Preintegrated::DiagnosticSnapshot& after,
+                               std::uintptr_t source = 0)
+{
+    if(!context || !context->active.load(std::memory_order_acquire))
+        return;
+    // All mutable values were copied under the preintegration mutex. Enqueue
+    // only after releasing it; no logger or sink runs inside that critical section.
+    Log(context->logger, spdlog::level::debug,
+        "EVENT={} PATH={} MAP={} LOOP_KF={} GENERATION={} KF={} PREV_KF={} OBJECT={} SOURCE_OBJECT={} "
+        "REV_BEFORE={} REV_AFTER={} MEASUREMENTS_BEFORE={} MEASUREMENTS_AFTER={} DT_BEFORE={} DT_AFTER={}",
+        event, path, context->map, context->loop_kf, context->generation, context->kf, context->previous_kf,
+        after.object, source, before.revision, after.revision, before.measurements, after.measurements,
+        before.dt, after.dt);
+}
+} // namespace
+
+Preintegrated::DiagnosticSnapshot Preintegrated::DiagnosticSnapshotUnlocked() const
+{
+    return {reinterpret_cast<std::uintptr_t>(this), mutation_revision_, bias_revision_, mvMeasurements.size(), dT};
+}
+
+Preintegrated::DiagnosticSnapshot Preintegrated::GetDiagnosticSnapshot()
+{
+    const std::lock_guard<std::mutex> lock(mMutex);
+    return DiagnosticSnapshotUnlocked();
+}
+
+Preintegrated::DiagnosticSnapshot Preintegrated::WatchForGBA(const std::shared_ptr<DiagnosticContext>& context)
+{
+    const std::lock_guard<std::mutex> lock(mMutex);
+    diagnostic_context_ = context;
+    return DiagnosticSnapshotUnlocked();
+}
+
 Preintegrated::Preintegrated(const Bias &b_, const Calib &calib)
 {
     Nga = calib.Cov;
@@ -111,41 +150,88 @@ Preintegrated::Preintegrated(const Bias &b_, const Calib &calib)
     Initialize(b_);
 }
 
-// Copy constructor
-Preintegrated::Preintegrated(Preintegrated* pImuPre): dT(pImuPre->dT),C(pImuPre->C), Info(pImuPre->Info),
-     Nga(pImuPre->Nga), NgaWalk(pImuPre->NgaWalk), b(pImuPre->b), dR(pImuPre->dR), dV(pImuPre->dV),
-    dP(pImuPre->dP), JRg(pImuPre->JRg), JVg(pImuPre->JVg), JVa(pImuPre->JVa), JPg(pImuPre->JPg), JPa(pImuPre->JPa),
-    avgA(pImuPre->avgA), avgW(pImuPre->avgW), bu(pImuPre->bu), db(pImuPre->db), mvMeasurements(pImuPre->mvMeasurements)
+// Copy diagnostic values from the source under its mutex, but never inherit
+// its observer: the new object has a different process-local identity.
+Preintegrated::Preintegrated(Preintegrated* pImuPre)
 {
-
+    CopyFrom(pImuPre);
 }
 
 void Preintegrated::CopyFrom(Preintegrated* pImuPre)
 {
-    dT = pImuPre->dT;
-    C = pImuPre->C;
-    Info = pImuPre->Info;
-    Nga = pImuPre->Nga;
-    NgaWalk = pImuPre->NgaWalk;
-    b.CopyFrom(pImuPre->b);
-    dR = pImuPre->dR;
-    dV = pImuPre->dV;
-    dP = pImuPre->dP;
-    JRg = pImuPre->JRg;
-    JVg = pImuPre->JVg;
-    JVa = pImuPre->JVa;
-    JPg = pImuPre->JPg;
-    JPa = pImuPre->JPa;
-    avgA = pImuPre->avgA;
-    avgW = pImuPre->avgW;
-    bu.CopyFrom(pImuPre->bu);
-    db = pImuPre->db;
-    mvMeasurements = pImuPre->mvMeasurements;
+    if(pImuPre == this)
+        return;
+    std::shared_ptr<DiagnosticContext> context;
+    DiagnosticSnapshot before, after;
+    {
+        const std::scoped_lock<std::mutex, std::mutex> lock(mMutex, pImuPre->mMutex);
+        context = diagnostic_context_.lock();
+        if(context)
+            before = DiagnosticSnapshotUnlocked();
+        dT = pImuPre->dT;
+        C = pImuPre->C;
+        Info = pImuPre->Info;
+        Nga = pImuPre->Nga;
+        NgaWalk = pImuPre->NgaWalk;
+        b.CopyFrom(pImuPre->b);
+        dR = pImuPre->dR;
+        dV = pImuPre->dV;
+        dP = pImuPre->dP;
+        JRg = pImuPre->JRg;
+        JVg = pImuPre->JVg;
+        JVa = pImuPre->JVa;
+        JPg = pImuPre->JPg;
+        JPa = pImuPre->JPa;
+        avgA = pImuPre->avgA;
+        avgW = pImuPre->avgW;
+        bu.CopyFrom(pImuPre->bu);
+        db = pImuPre->db;
+        mvMeasurements = pImuPre->mvMeasurements;
+
+        ++mutation_revision_;
+        if(context)
+            after = DiagnosticSnapshotUnlocked();
+    }
+    LogPreintegrationMutation(context, "IMU_PREINT_MUTATION", "COPY_FROM", before, after,
+                              reinterpret_cast<std::uintptr_t>(pImuPre));
 }
 
-
-void Preintegrated::Initialize(const Bias &b_)
+void Preintegrated::Initialize(const Bias &bias)
 {
+    std::shared_ptr<DiagnosticContext> context;
+    DiagnosticSnapshot before, after;
+    {
+        const std::lock_guard<std::mutex> lock(mMutex);
+        context = diagnostic_context_.lock();
+        if(context)
+            before = DiagnosticSnapshotUnlocked();
+        InitializeUnlocked(bias);
+        if(context)
+            after = DiagnosticSnapshotUnlocked();
+    }
+    LogPreintegrationMutation(context, "IMU_PREINT_MUTATION", "INITIALIZE", before, after);
+}
+
+void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
+                                           const Eigen::Vector3f &angular_velocity, const float &dt)
+{
+    std::shared_ptr<DiagnosticContext> context;
+    DiagnosticSnapshot before, after;
+    {
+        const std::lock_guard<std::mutex> lock(mMutex);
+        context = diagnostic_context_.lock();
+        if(context)
+            before = DiagnosticSnapshotUnlocked();
+        IntegrateNewMeasurementUnlocked(acceleration, angular_velocity, dt);
+        if(context)
+            after = DiagnosticSnapshotUnlocked();
+    }
+    LogPreintegrationMutation(context, "IMU_PREINT_MUTATION", "INTEGRATE", before, after);
+}
+
+void Preintegrated::InitializeUnlocked(const Bias &b_)
+{
+    ++mutation_revision_;
     dR.setIdentity();
     dV.setZero();
     dP.setZero();
@@ -167,15 +253,26 @@ void Preintegrated::Initialize(const Bias &b_)
 
 void Preintegrated::Reintegrate()
 {
-    std::unique_lock<std::mutex> lock(mMutex);
-    const std::vector<integrable> aux = mvMeasurements;
-    Initialize(bu);
-    for(size_t i=0;i<aux.size();i++)
-        IntegrateNewMeasurement(aux[i].a,aux[i].w,aux[i].t);
+    std::shared_ptr<DiagnosticContext> context;
+    DiagnosticSnapshot before, after;
+    {
+        std::unique_lock<std::mutex> lock(mMutex);
+        context = diagnostic_context_.lock();
+        if(context)
+            before = DiagnosticSnapshotUnlocked();
+        const std::vector<integrable> aux = mvMeasurements;
+        InitializeUnlocked(bu);
+        for(size_t i=0;i<aux.size();i++)
+            IntegrateNewMeasurementUnlocked(aux[i].a,aux[i].w,aux[i].t);
+        if(context)
+            after = DiagnosticSnapshotUnlocked();
+    }
+    LogPreintegrationMutation(context, "IMU_PREINT_MUTATION", "REINTEGRATE", before, after);
 }
 
-void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration, const Eigen::Vector3f &angVel, const float &dt)
+void Preintegrated::IntegrateNewMeasurementUnlocked(const Eigen::Vector3f &acceleration, const Eigen::Vector3f &angVel, float dt)
 {
+    ++mutation_revision_;
     mvMeasurements.push_back(integrable(acceleration,angVel,dt));
 
     // Position is updated firstly, as it depends on previously computed velocity and rotation.
@@ -236,34 +333,47 @@ void Preintegrated::IntegrateNewMeasurement(const Eigen::Vector3f &acceleration,
 
 void Preintegrated::MergePrevious(Preintegrated* pPrev)
 {
-    if (pPrev==this)
+    if(pPrev == this)
         return;
+    std::shared_ptr<DiagnosticContext> context;
+    DiagnosticSnapshot before, after;
+    {
+        std::unique_lock<std::mutex> lock1(mMutex);
+        std::unique_lock<std::mutex> lock2(pPrev->mMutex);
+        context = diagnostic_context_.lock();
+        if(context)
+            before = DiagnosticSnapshotUnlocked();
+        Bias bav;
+        bav.bwx = bu.bwx;
+        bav.bwy = bu.bwy;
+        bav.bwz = bu.bwz;
+        bav.bax = bu.bax;
+        bav.bay = bu.bay;
+        bav.baz = bu.baz;
 
-    std::unique_lock<std::mutex> lock1(mMutex);
-    std::unique_lock<std::mutex> lock2(pPrev->mMutex);
-    Bias bav;
-    bav.bwx = bu.bwx;
-    bav.bwy = bu.bwy;
-    bav.bwz = bu.bwz;
-    bav.bax = bu.bax;
-    bav.bay = bu.bay;
-    bav.baz = bu.baz;
+        const std::vector<integrable > aux1 = pPrev->mvMeasurements;
+        const std::vector<integrable> aux2 = mvMeasurements;
 
-    const std::vector<integrable > aux1 = pPrev->mvMeasurements;
-    const std::vector<integrable> aux2 = mvMeasurements;
+        InitializeUnlocked(bav);
+        for(size_t i=0;i<aux1.size();i++)
+            IntegrateNewMeasurementUnlocked(aux1[i].a,aux1[i].w,aux1[i].t);
+        for(size_t i=0;i<aux2.size();i++)
+            IntegrateNewMeasurementUnlocked(aux2[i].a,aux2[i].w,aux2[i].t);
 
-    Initialize(bav);
-    for(size_t i=0;i<aux1.size();i++)
-        IntegrateNewMeasurement(aux1[i].a,aux1[i].w,aux1[i].t);
-    for(size_t i=0;i<aux2.size();i++)
-        IntegrateNewMeasurement(aux2[i].a,aux2[i].w,aux2[i].t);
-
+        if(context)
+            after = DiagnosticSnapshotUnlocked();
+    }
+    LogPreintegrationMutation(context, "IMU_PREINT_MERGE", "MERGE_PREVIOUS", before, after,
+                              reinterpret_cast<std::uintptr_t>(pPrev));
 }
 
 void Preintegrated::SetNewBias(const Bias &bu_)
 {
     std::unique_lock<std::mutex> lock(mMutex);
     bu = bu_;
+    // Explicit-bias EdgeInertial getters use the original b/deltas, not bu/db.
+    // Track this separately so a normal LBA bias update is not a false mutation.
+    ++bias_revision_;
 
     db(0) = bu_.bwx-b.bwx;
     db(1) = bu_.bwy-b.bwy;
