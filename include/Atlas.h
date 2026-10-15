@@ -28,6 +28,8 @@
 
 #include <set>
 #include <mutex>
+#include <atomic>
+#include <cstdint>
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/export.hpp>
 
@@ -81,6 +83,11 @@ public:
     // also reconnects restored maps; no logger handles enter serialize().
     void SetLoggers(std::shared_ptr<spdlog::logger> logger,
                     std::shared_ptr<spdlog::logger> mapLogger);
+
+    // Setup/deserialization only, before workers or frame input. Run counters
+    // are not serialized and survive clearMap/clearAtlas within this process.
+    void SetTrackingStatisticsEnabled(bool enabled);
+    std::uint64_t GetInsertedKeyFramesTotal() const noexcept;
 
     void CreateNewMap();
     void ChangeMap(Map* pMap);
@@ -149,6 +156,11 @@ protected:
 
     std::shared_ptr<spdlog::logger> mLogger;
     std::shared_ptr<spdlog::logger> mMapLogger;
+
+    // Only Atlas admission counts: merge transfers call Map::AddKeyFrame
+    // directly. Atomic publication adds no diagnostic map-lock acquisition.
+    bool mTrackingStatisticsEnabled = false;
+    std::atomic<std::uint64_t> mnInsertedKeyFramesTotal{0};
 
     std::set<Map*> mspMaps;
     std::set<Map*> mspBadMaps;

@@ -97,6 +97,17 @@ void Atlas::CreateNewMap()
     mspMaps.insert(mpCurrentMap);
 }
 
+void Atlas::SetTrackingStatisticsEnabled(bool enabled)
+{
+    mTrackingStatisticsEnabled = enabled;
+}
+
+std::uint64_t Atlas::GetInsertedKeyFramesTotal() const noexcept
+{
+    // Only a numerical total is published, not associated map/KF data.
+    return mnInsertedKeyFramesTotal.load(std::memory_order_relaxed);
+}
+
 void Atlas::ChangeMap(Map* pMap)
 {
     unique_lock<mutex> lock(mMutexAtlas);
@@ -124,7 +135,9 @@ void Atlas::SetViewer(Viewer* pViewer)
 void Atlas::AddKeyFrame(KeyFrame* pKF)
 {
     Map* pMapKF = pKF->GetMap();
-    pMapKF->AddKeyFrame(pKF);
+    const bool inserted = pMapKF->AddKeyFrame(pKF);
+    if(mTrackingStatisticsEnabled && inserted)
+        mnInsertedKeyFramesTotal.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Atlas::AddMapPoint(MapPoint* pMP)

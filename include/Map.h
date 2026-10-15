@@ -79,7 +79,9 @@ public:
     void SetLogger(std::shared_ptr<spdlog::logger> logger);
     const std::shared_ptr<spdlog::logger> &GetLogger() const;
 
-    void AddKeyFrame(KeyFrame* pKF);
+    // Report actual set insertion under the existing map mutex, allowing Atlas
+    // to avoid counting the initialization KF again when mapping consumes it.
+    bool AddKeyFrame(KeyFrame* pKF);
     void AddMapPoint(MapPoint* pMP);
     void EraseMapPoint(MapPoint* pMP);
     void EraseKeyFrame(KeyFrame* pKF);

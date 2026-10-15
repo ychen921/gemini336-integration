@@ -70,7 +70,7 @@ const std::shared_ptr<spdlog::logger> &Map::GetLogger() const
     return mLogger;
 }
 
-void Map::AddKeyFrame(KeyFrame *pKF)
+bool Map::AddKeyFrame(KeyFrame *pKF)
 {
     unique_lock<mutex> lock(mMutexMap);
     if(mspKeyFrames.empty()){
@@ -79,7 +79,7 @@ void Map::AddKeyFrame(KeyFrame *pKF)
         mpKFinitial = pKF;
         mpKFlowerID = pKF;
     }
-    mspKeyFrames.insert(pKF);
+    const bool inserted = mspKeyFrames.insert(pKF).second;
     if(pKF->mnId>mnMaxKFid)
     {
         mnMaxKFid=pKF->mnId;
@@ -88,6 +88,7 @@ void Map::AddKeyFrame(KeyFrame *pKF)
     {
         mpKFlowerID = pKF;
     }
+    return inserted;
 }
 
 void Map::AddMapPoint(MapPoint *pMP)

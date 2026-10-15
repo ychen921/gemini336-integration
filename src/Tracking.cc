@@ -34,6 +34,7 @@
 #include <mutex>
 #include <chrono>
 #include <memory>
+#include <stdexcept>
 
 
 using namespace std;
@@ -42,13 +43,17 @@ namespace ORB_SLAM3
 {
 
 
-Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq, std::shared_ptr<spdlog::logger> logger):
+Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq, std::shared_ptr<spdlog::logger> logger, bool enableTrackingSnapshot):
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
-    mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
+    mbOnlyTracking(false), mTrackingSnapshotEnabled(enableTrackingSnapshot), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "tracking")), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
+    if(mTrackingSnapshotEnabled && mSensor!=System::STEREO && mSensor!=System::IMU_STEREO)
+        throw std::invalid_argument("Tracking snapshots require STEREO or IMU_STEREO");
+    mTrackingSnapshot.enabled = mTrackingSnapshotEnabled;
+
     // Load camera parameters from settings file
     if(settings){
         newParameterLoader(settings);
@@ -1452,6 +1457,19 @@ bool Tracking::GetStepByStep()
     return bStepByStep;
 }
 
+TrackingSnapshot Tracking::CaptureTrackingSnapshot() const noexcept
+{
+    TrackingSnapshot snapshot = mTrackingSnapshot;
+    if(mTrackingSnapshotEnabled)
+    {
+        // Track may have replaced mCurrentFrame during map creation. Return
+        // state is sampled now, while frame/map identity stays as captured.
+        snapshot.raw_tracking_state = mState;
+        snapshot.keyframes_inserted_total = mpAtlas->GetInsertedKeyFramesTotal();
+    }
+    return snapshot;
+}
+
 
 
 Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename)
@@ -1835,6 +1853,16 @@ void Tracking::ResetFrameIMU()
 
 void Tracking::Track()
 {
+    if(mTrackingSnapshotEnabled)
+    {
+        // Reset validity even for returns before map acquisition/local tracking.
+        mTrackingSnapshot = TrackingSnapshot{};
+        mTrackingSnapshot.enabled = true;
+        mTrackingSnapshot.has_frame = true;
+        mTrackingSnapshot.frame_id = mCurrentFrame.mnId;
+        mTrackingSnapshot.sensor_timestamp_sec = mCurrentFrame.mTimeStamp;
+    }
+
     mpLocalMapper->RethrowFailure();
     mpLoopClosing->RethrowFailure();
     if (mpViewer) mpViewer->RethrowFailure();
@@ -1958,6 +1986,13 @@ void Tracking::Track()
     // Do not continue tracking on a map whose update did not complete.
     mpLocalMapper->RethrowFailure();
     mpLoopClosing->RethrowFailure();
+
+    if(mTrackingSnapshotEnabled)
+    {
+        // Merge changes IDs under this existing map-update synchronization.
+        mTrackingSnapshot.tracking_map_id = pCurrentMap->GetId();
+        mTrackingSnapshot.map_id_valid = true;
+    }
 
     mbMapUpdated = false;
 
@@ -3102,6 +3137,14 @@ bool Tracking::TrackLocalMap()
             else if(mSensor==System::STEREO)
                 mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
         }
+    }
+
+    if(mTrackingSnapshotEnabled && !mbOnlyTracking)
+    {
+        // Reuse the persistent inlier count just computed by the algorithm.
+        // Localization-only counting also includes temporary VO associations.
+        mTrackingSnapshot.tracked_mappoint_inliers = static_cast<std::uint32_t>(mnMatchesInliers);
+        mTrackingSnapshot.tracked_mappoint_inliers_valid = true;
     }
 
     // Decide if the tracking was succesful

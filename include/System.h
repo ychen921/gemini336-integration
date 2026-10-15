@@ -43,6 +43,7 @@
 #include "Viewer.h"
 #include "ImuTypes.h"
 #include "Settings.h"
+#include "TrackingSnapshot.h"
 
 
 namespace ORB_SLAM3
@@ -121,7 +122,8 @@ public:
            const string &strSequence = std::string(),
            std::function<bool()> externalStopRequested = {},
            std::function<void(std::exception_ptr)> viewerStopNotification = {},
-           LoggerFactory loggerFactory = {});
+           LoggerFactory loggerFactory = {},
+           bool enableTrackingSnapshot = false);
 
     // Obtain module handles before launching their producers. Injected loggers
     // remain usable only until the owning session is finished, after all joins.
@@ -208,6 +210,14 @@ public:
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+
+    // Opt-in at construction, for STEREO/IMU_STEREO only. Copies the last
+    // normally returned frame under the existing state mutex; no map access.
+    // Disabled/before-first-frame snapshots have has_frame == false.
+    TrackingSnapshot GetTrackingSnapshot();
+    // Live cumulative insertions, including backend work after the last frame.
+    // Read after Shutdown for the final value; zero when collection is disabled.
+    std::uint64_t GetInsertedKeyFramesTotal() const noexcept;
 
     // For debugging
     double GetTimeFromIMUInit();
@@ -298,6 +308,7 @@ private:
     int mTrackingState;
     std::vector<MapPoint*> mTrackedMapPoints;
     std::vector<cv::KeyPoint> mTrackedKeyPointsUn;
+    TrackingSnapshot mTrackingSnapshot;
     std::mutex mMutexState;
 
     //

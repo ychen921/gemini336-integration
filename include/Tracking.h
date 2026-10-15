@@ -32,6 +32,7 @@
 #include "LoopClosing.h"
 #include "Frame.h"
 #include "FrameImuState.h"
+#include "TrackingSnapshot.h"
 #include <atomic>
 #include "ORBVocabulary.h"
 #include "KeyFrameDatabase.h"
@@ -64,7 +65,7 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     Tracking(System* pSys, ORBVocabulary* pVoc, FrameDrawer* pFrameDrawer, MapDrawer* pMapDrawer, Atlas* pAtlas,
              KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq=std::string(),
-             std::shared_ptr<spdlog::logger> logger = {});
+             std::shared_ptr<spdlog::logger> logger = {}, bool enableTrackingSnapshot = false);
 
     ~Tracking();
 
@@ -110,6 +111,11 @@ public:
     void NewDataset();
     int GetNumberDataset();
     int GetMatchesInliers();
+
+    // Tracking-owner capture after normal stereo tracking: cached frame/map
+    // measurements plus current return state and asynchronous insertion total.
+    // System publishes the captured value under its existing state mutex.
+    TrackingSnapshot CaptureTrackingSnapshot() const noexcept;
 
     //DEBUG
     void SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder="");
@@ -205,6 +211,11 @@ protected:
 
     // Main tracking function. It is independent of the input sensor.
     void Track();
+
+    // Setup-only opt-in; all frame fields are cleared before each tracking call
+    // so early returns cannot reuse a previous frame's measurements.
+    const bool mTrackingSnapshotEnabled;
+    TrackingSnapshot mTrackingSnapshot;
 
     // Map initialization for stereo and RGB-D
     void StereoInitialization();

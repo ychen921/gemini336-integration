@@ -22,6 +22,7 @@
 #include "Converter.h"
 #include <thread>
 #include <utility>
+#include <stdexcept>
 #include <pangolin/pangolin.h>
 #include <iomanip>
 #include <openssl/md5.h>
@@ -43,7 +44,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
                const bool bUseViewer, const int initFr, const string &strSequence,
                std::function<bool()> externalStopRequested,
                std::function<void(std::exception_ptr)> viewerStopNotification,
-               LoggerFactory loggerFactory):
+               LoggerFactory loggerFactory, bool enableTrackingSnapshot):
     mLoggerFactory(MakeLoggerFactory(std::move(loggerFactory))),
     mLogger(GetModuleLogger(mLoggerFactory, "system")),
     mFatalLogger(GetModuleLogger(mLoggerFactory, "system", true)),
@@ -52,6 +53,11 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mExternalStopRequested(std::move(externalStopRequested)),
     mViewerStopNotification(std::move(viewerStopNotification))
 {
+    // Keep unsupported modes explicit rather than returning misleading partial
+    // measurements. The default constructor behavior is unchanged.
+    if(enableTrackingSnapshot && mSensor!=STEREO && mSensor!=IMU_STEREO)
+        throw std::invalid_argument("Tracking snapshots require STEREO or IMU_STEREO");
+
     // Output welcome message
     LogStream(mLogger, spdlog::level::info, [](std::ostream &output) {
         output << endl <<
@@ -194,6 +200,11 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     }
 
 
+    // Configure diagnostics before any worker launch, including a restored
+    // Atlas. Existing loaded KFs are not insertions made by this run.
+    mpAtlas->SetTrackingStatisticsEnabled(enableTrackingSnapshot);
+    mTrackingSnapshot.enabled = enableTrackingSnapshot;
+
     if (mSensor==IMU_STEREO || mSensor==IMU_MONOCULAR || mSensor==IMU_RGBD)
         mpAtlas->SetInertialSensor();
 
@@ -205,7 +216,8 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     //(it will live in the main thread of execution, the one that called this constructor)
     Log(mLogger, spdlog::level::info, "Seq. Name: {}", strSequence);
     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
-                             mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence, GetLogger("tracking"));
+                             mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence,
+                             GetLogger("tracking"), enableTrackingSnapshot);
 
     // Construct/configure workers before launching their threads.
     mpLocalMapper = new LocalMapping(this, mpAtlas, mSensor==MONOCULAR || mSensor==IMU_MONOCULAR,
@@ -343,6 +355,11 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+
+    // Publish only normally returned calls, in the same critical section as
+    // the legacy raw state. The tracking snapshot owns no live map pointers.
+    if(mTrackingSnapshot.enabled)
+        mTrackingSnapshot = mpTracker->CaptureTrackingSnapshot();
 
     return Tcw;
 }
@@ -1388,6 +1405,17 @@ int System::GetTrackingState()
 {
     unique_lock<mutex> lock(mMutexState);
     return mTrackingState;
+}
+
+TrackingSnapshot System::GetTrackingSnapshot()
+{
+    unique_lock<mutex> lock(mMutexState);
+    return mTrackingSnapshot;
+}
+
+std::uint64_t System::GetInsertedKeyFramesTotal() const noexcept
+{
+    return mpAtlas->GetInsertedKeyFramesTotal();
 }
 
 vector<MapPoint*> System::GetTrackedMapPoints()
