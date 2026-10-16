@@ -25,6 +25,7 @@
 #include "GeometricCamera.h"
 #include "Pinhole.h"
 #include "KannalaBrandt8.h"
+#include "TrackingSnapshot.h"
 
 #include <set>
 #include <mutex>
@@ -88,6 +89,10 @@ public:
     // are not serialized and survive clearMap/clearAtlas within this process.
     void SetTrackingStatisticsEnabled(bool enabled);
     std::uint64_t GetInsertedKeyFramesTotal() const noexcept;
+    bool TrackingStatisticsEnabled() const noexcept { return mTrackingStatisticsEnabled; }
+    // Rare events only; counters survive asynchronous log loss and map resets.
+    void RecordEvaluationEvent(EvaluationEvent type, EvaluationEventData event);
+    EvaluationEventTotals GetEvaluationEventTotals() const noexcept;
 
     void CreateNewMap();
     void ChangeMap(Map* pMap);
@@ -161,6 +166,9 @@ protected:
     // directly. Atomic publication adds no diagnostic map-lock acquisition.
     bool mTrackingStatisticsEnabled = false;
     std::atomic<std::uint64_t> mnInsertedKeyFramesTotal{0};
+    std::array<std::atomic<std::uint64_t>, EvaluationEventNames.size()>
+        mEvaluationEventCounts{{0, 0, 0, 0, 0, 0, 0, 0}};
+    std::atomic<std::uint64_t> mEvaluationEventSequence{0};
 
     std::set<Map*> mspMaps;
     std::set<Map*> mspBadMaps;

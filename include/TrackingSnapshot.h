@@ -2,10 +2,54 @@
 #define ORB_SLAM3_TRACKING_SNAPSHOT_H
 
 #include <cstdint>
+#include <cstddef>
 #include <type_traits>
+#include <array>
+#include <chrono>
 
 namespace ORB_SLAM3
 {
+
+// Source time is independent of asynchronous log delivery order.
+inline std::int64_t EvaluationSteadyNs() noexcept
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+enum class EvaluationEvent : std::size_t
+{
+    MapBaseline, TrackingLost, Relocalized, MapCreated, MapSwitched,
+    ActiveMapReset, AtlasReset, MergeApplied, Count
+};
+
+inline constexpr std::array<const char*, static_cast<std::size_t>(EvaluationEvent::Count)>
+    EvaluationEventNames{{"map_baseline", "tracking_lost", "relocalized", "map_created",
+                          "map_switched", "active_map_reset", "atlas_reset", "merge_applied"}};
+
+// Capture primitives under the caller's existing synchronization, never pointers.
+struct EvaluationEventData
+{
+    std::int64_t steady_ns = 0;
+    bool frame_valid = false;
+    bool map_valid = false;
+    bool target_map_valid = false;
+    bool result_map_valid = false;
+    bool keyframes_valid = false;
+    std::uint64_t frame_id = 0;
+    double sensor_timestamp_sec = 0.0;
+    std::uint64_t map_id = 0;
+    std::uint64_t target_map_id = 0;
+    std::uint64_t result_map_id = 0;
+    std::uint64_t keyframe_id = 0;
+    std::uint64_t target_keyframe_id = 0;
+};
+
+struct EvaluationEventTotals
+{
+    bool enabled = false;
+    std::array<std::uint64_t, EvaluationEventNames.size()> counts{};
+};
 
 // Numerical values from the last normally returned stereo tracking call. A
 // throwing call does not replace System's published snapshot. No backend object
@@ -22,6 +66,9 @@ struct TrackingSnapshot
     // SLAM mode, before new KF points are added. This is not a unique-point count.
     // Initialization, skipped local tracking and localization-only mode are N/A.
     std::uint32_t tracked_mappoint_inliers = 0;
+    // Entries/successes during this call, independent of the state at return.
+    std::uint32_t tracking_lost_events = 0;
+    std::uint32_t relocalization_events = 0;
     // Capture identity before Track can replace mCurrentFrame during map creation.
     std::uint64_t frame_id = 0;
     // Map used by this frame at the existing map-update synchronization point.

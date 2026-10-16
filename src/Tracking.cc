@@ -1470,6 +1470,34 @@ TrackingSnapshot Tracking::CaptureTrackingSnapshot() const noexcept
     return snapshot;
 }
 
+void Tracking::SetLostState()
+{
+    const bool entered = mState != LOST;
+    mState = LOST;
+    if(!mTrackingSnapshotEnabled || !entered) return;
+    ++mTrackingSnapshot.tracking_lost_events;
+    EvaluationEventData event;
+    event.frame_valid = mTrackingSnapshot.has_frame;
+    event.frame_id = mTrackingSnapshot.frame_id;
+    event.sensor_timestamp_sec = mTrackingSnapshot.sensor_timestamp_sec;
+    event.map_valid = mTrackingSnapshot.map_id_valid;
+    event.map_id = mTrackingSnapshot.tracking_map_id;
+    mpAtlas->RecordEvaluationEvent(EvaluationEvent::TrackingLost, event);
+}
+
+void Tracking::RecordRelocalization()
+{
+    if(!mTrackingSnapshotEnabled || mTrackingSnapshot.relocalization_events != 0) return;
+    ++mTrackingSnapshot.relocalization_events;
+    EvaluationEventData event;
+    event.frame_valid = mTrackingSnapshot.has_frame;
+    event.frame_id = mTrackingSnapshot.frame_id;
+    event.sensor_timestamp_sec = mTrackingSnapshot.sensor_timestamp_sec;
+    event.map_valid = mTrackingSnapshot.map_id_valid;
+    event.map_id = mTrackingSnapshot.tracking_map_id;
+    mpAtlas->RecordEvaluationEvent(EvaluationEvent::Relocalized, event);
+}
+
 
 
 Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename)
@@ -2070,7 +2098,7 @@ void Tracking::Track()
                     if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
                          (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD))
                     {
-                        mState = LOST;
+                        SetLostState();
                     }
                     else if(pCurrentMap->KeyFramesInMap()>10)
                     {
@@ -2080,7 +2108,7 @@ void Tracking::Track()
                     }
                     else
                     {
-                        mState = LOST;
+                        SetLostState();
                     }
                 }
             }
@@ -2101,7 +2129,7 @@ void Tracking::Track()
 
                         if (mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
                         {
-                            mState = LOST;
+                            SetLostState();
                             Log(mLogger, spdlog::level::warn, "{}", "Track Lost...");
                             bOK=false;
                         }
@@ -2114,7 +2142,7 @@ void Tracking::Track()
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
                         if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
                         {
-                            mState = LOST;
+                            SetLostState();
                             Log(mLogger, spdlog::level::warn, "{}", "Track Lost...");
                             bOK=false;
                         }
@@ -3894,6 +3922,7 @@ bool Tracking::Relocalization()
     {
         mnLastRelocFrameId = mCurrentFrame.mnId;
         Log(mLogger, spdlog::level::info, "{}", "Relocalized!!");
+        RecordRelocalization();
         return true;
     }
 

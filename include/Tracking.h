@@ -216,6 +216,9 @@ protected:
     // so early returns cannot reuse a previous frame's measurements.
     const bool mTrackingSnapshotEnabled;
     TrackingSnapshot mTrackingSnapshot;
+    // Record entries at their source: a same-call reset may hide raw LOST.
+    void SetLostState();
+    void RecordRelocalization();
 
     // Map initialization for stereo and RGB-D
     void StereoInitialization();

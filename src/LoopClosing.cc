@@ -1594,9 +1594,20 @@ void LoopClosing::MergeLocal()
         std::cout << "[Merge]: Ma has " << std::to_string(spLocalWindowMPs.size()) << " points" << std::endl;
     }*/
 
+    EvaluationEventData mergeEvent;
     {
         unique_lock<mutex> currentLock(pCurrentMap->mMutexMapUpdate); // We update the current map with the Merge information
         unique_lock<mutex> mergeLock(pMergeMap->mMutexMapUpdate); // We remove the Kfs and MPs in the merged area from the old map
+        if(mpAtlas->TrackingStatisticsEnabled())
+        {
+            // Preserve both original IDs before the surviving map is renamed.
+            mergeEvent.map_valid = mergeEvent.target_map_valid = true;
+            mergeEvent.map_id = pCurrentMap->GetId();
+            mergeEvent.target_map_id = pMergeMap->GetId();
+            mergeEvent.keyframes_valid = true;
+            mergeEvent.keyframe_id = mpCurrentKF->mnId;
+            mergeEvent.target_keyframe_id = mpMergeMatchedKF->mnId;
+        }
 
         //std::cout << "Merge local window: " << spLocalWindowKFs.size() << std::endl;
         //std::cout << "[Merge]: init merging maps " << std::endl;
@@ -1644,8 +1655,19 @@ void LoopClosing::MergeLocal()
         //TODO for debug
         pMergeMap->ChangeId(pCurrentMap->GetId());
 
+        if(mpAtlas->TrackingStatisticsEnabled())
+        {
+            mergeEvent.result_map_valid = true;
+            mergeEvent.result_map_id = pMergeMap->GetId();
+            mergeEvent.steady_ns = EvaluationSteadyNs();
+        }
+
         //std::cout << "[Merge]: merging maps finished" << std::endl;
     }
+
+    // Applied topology change, not a candidate detection or completed BA.
+    if(mergeEvent.steady_ns != 0)
+        mpAtlas->RecordEvaluationEvent(EvaluationEvent::MergeApplied, mergeEvent);
 
     //Rebuild the essential graph in the local window
     pCurrentMap->GetOriginKF()->SetFirstConnection(false);
@@ -1970,11 +1992,22 @@ void LoopClosing::MergeLocal2()
 
     // Load KFs and MPs from merge map
     //cout << "updating current map" << endl;
+    EvaluationEventData mergeEvent;
     {
         // Get Merge Map Mutex (This section stops tracking!!)
         unique_lock<mutex> currentLock(pCurrentMap->mMutexMapUpdate); // We update the current map with the Merge information
         unique_lock<mutex> mergeLock(pMergeMap->mMutexMapUpdate); // We remove the Kfs and MPs in the merged area from the old map
 
+        if(mpAtlas->TrackingStatisticsEnabled())
+        {
+            // In the inertial path, the matched map is moved into the active map.
+            mergeEvent.map_valid = mergeEvent.target_map_valid = true;
+            mergeEvent.map_id = pMergeMap->GetId();
+            mergeEvent.target_map_id = pCurrentMap->GetId();
+            mergeEvent.keyframes_valid = true;
+            mergeEvent.keyframe_id = mpMergeMatchedKF->mnId;
+            mergeEvent.target_keyframe_id = mpCurrentKF->mnId;
+        }
 
         vector<KeyFrame*> vpMergeMapKFs = pMergeMap->GetAllKeyFrames();
         vector<MapPoint*> vpMergeMapMPs = pMergeMap->GetAllMapPoints();
@@ -2011,7 +2044,17 @@ void LoopClosing::MergeLocal2()
             g2o::Sim3 g2oSiw(Tiw.unit_quaternion(),Tiw.translation(),1.0);
             NonCorrectedSim3[pKFi]=g2oSiw;
         }
+        if(mpAtlas->TrackingStatisticsEnabled())
+        {
+            mergeEvent.result_map_valid = true;
+            mergeEvent.result_map_id = pCurrentMap->GetId();
+            mergeEvent.steady_ns = EvaluationSteadyNs();
+        }
     }
+
+    // Record even when the small-map path below skips the optional inertial BA.
+    if(mergeEvent.steady_ns != 0)
+        mpAtlas->RecordEvaluationEvent(EvaluationEvent::MergeApplied, mergeEvent);
 
     //cout << "MergeMap init ID: " << pMergeMap->GetInitKFid() << "       CurrMap init ID: " << pCurrentMap->GetInitKFid() << endl;
 

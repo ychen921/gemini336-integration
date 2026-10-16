@@ -1418,6 +1418,11 @@ std::uint64_t System::GetInsertedKeyFramesTotal() const noexcept
     return mpAtlas->GetInsertedKeyFramesTotal();
 }
 
+EvaluationEventTotals System::GetEvaluationEventTotals() const noexcept
+{
+    return mpAtlas->GetEvaluationEventTotals();
+}
+
 vector<MapPoint*> System::GetTrackedMapPoints()
 {
     unique_lock<mutex> lock(mMutexState);

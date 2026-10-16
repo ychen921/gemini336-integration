@@ -218,6 +218,8 @@ public:
     // Live cumulative insertions, including backend work after the last frame.
     // Read after Shutdown for the final value; zero when collection is disabled.
     std::uint64_t GetInsertedKeyFramesTotal() const noexcept;
+    // Coherent final totals require the same post-Shutdown ownership as above.
+    EvaluationEventTotals GetEvaluationEventTotals() const noexcept;
 
     // For debugging
     double GetTimeFromIMUInit();

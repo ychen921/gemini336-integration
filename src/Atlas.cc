@@ -95,11 +95,58 @@ void Atlas::CreateNewMap()
     mpCurrentMap = new Map(mnLastInitKFidMap, mMapLogger);
     mpCurrentMap->SetCurrentMap();
     mspMaps.insert(mpCurrentMap);
+    EvaluationEventData event;
+    if(mTrackingStatisticsEnabled)
+    {
+        event.map_valid = true;
+        event.map_id = mpCurrentMap->GetId();
+        event.steady_ns = EvaluationSteadyNs();
+    }
+    lock.unlock();
+    RecordEvaluationEvent(EvaluationEvent::MapCreated, event);
 }
 
 void Atlas::SetTrackingStatisticsEnabled(bool enabled)
 {
+    const bool firstEnable = enabled && !mTrackingStatisticsEnabled;
     mTrackingStatisticsEnabled = enabled;
+    // Initial/restored maps predate collection; distinguish their baseline from
+    // maps created later. Setup has no concurrent producers.
+    if(firstEnable && mpCurrentMap)
+    {
+        EvaluationEventData event;
+        event.map_valid = true;
+        event.map_id = mpCurrentMap->GetId();
+        RecordEvaluationEvent(EvaluationEvent::MapBaseline, event);
+    }
+}
+
+void Atlas::RecordEvaluationEvent(EvaluationEvent type, EvaluationEventData event)
+{
+    if(!mTrackingStatisticsEnabled) return;
+    const std::size_t index = static_cast<std::size_t>(type);
+    if(index >= mEvaluationEventCounts.size())
+        throw std::invalid_argument("Invalid evaluation event type");
+    if(event.steady_ns == 0) event.steady_ns = EvaluationSteadyNs();
+    mEvaluationEventCounts[index].fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t sequence = mEvaluationEventSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    Log(mLogger, spdlog::level::info,
+        "T01_EVENT type={} sequence={} steady_ns={} frame_valid={} frame_id={} "
+        "sensor_timestamp_sec={:.17g} map_valid={} map_id={} target_map_valid={} target_map_id={} "
+        "result_map_valid={} result_map_id={} keyframes_valid={} keyframe_id={} target_keyframe_id={}",
+        EvaluationEventNames[index], sequence, event.steady_ns, int(event.frame_valid), event.frame_id,
+        event.sensor_timestamp_sec, int(event.map_valid), event.map_id, int(event.target_map_valid),
+        event.target_map_id, int(event.result_map_valid), event.result_map_id, int(event.keyframes_valid),
+        event.keyframe_id, event.target_keyframe_id);
+}
+
+EvaluationEventTotals Atlas::GetEvaluationEventTotals() const noexcept
+{
+    EvaluationEventTotals totals;
+    totals.enabled = mTrackingStatisticsEnabled;
+    for(std::size_t index = 0; index < totals.counts.size(); ++index)
+        totals.counts[index] = mEvaluationEventCounts[index].load(std::memory_order_relaxed);
+    return totals;
 }
 
 std::uint64_t Atlas::GetInsertedKeyFramesTotal() const noexcept
@@ -111,6 +158,15 @@ std::uint64_t Atlas::GetInsertedKeyFramesTotal() const noexcept
 void Atlas::ChangeMap(Map* pMap)
 {
     unique_lock<mutex> lock(mMutexAtlas);
+    const bool changed = mpCurrentMap != pMap;
+    EvaluationEventData event;
+    if(mTrackingStatisticsEnabled)
+    {
+        event.map_valid = mpCurrentMap != nullptr;
+        if(event.map_valid) event.map_id = mpCurrentMap->GetId();
+        event.target_map_valid = true;
+        event.target_map_id = pMap->GetId();
+    }
     Log(mLogger, spdlog::level::info, "Change to map with id: {}", pMap->GetId());
     if(mpCurrentMap){
         mpCurrentMap->SetStoredMap();
@@ -118,6 +174,9 @@ void Atlas::ChangeMap(Map* pMap)
 
     mpCurrentMap = pMap;
     mpCurrentMap->SetCurrentMap();
+    if(mTrackingStatisticsEnabled) event.steady_ns = EvaluationSteadyNs();
+    lock.unlock();
+    if(changed) RecordEvaluationEvent(EvaluationEvent::MapSwitched, event);
 }
 
 unsigned long int Atlas::GetLastInitKFid()
@@ -264,12 +323,27 @@ int Atlas::CountMaps()
 void Atlas::clearMap()
 {
     unique_lock<mutex> lock(mMutexAtlas);
+    EvaluationEventData event;
+    if(mTrackingStatisticsEnabled)
+    {
+        event.map_valid = true;
+        event.map_id = mpCurrentMap->GetId();
+    }
     mpCurrentMap->clear();
+    if(mTrackingStatisticsEnabled) event.steady_ns = EvaluationSteadyNs();
+    lock.unlock();
+    RecordEvaluationEvent(EvaluationEvent::ActiveMapReset, event);
 }
 
 void Atlas::clearAtlas()
 {
     unique_lock<mutex> lock(mMutexAtlas);
+    EvaluationEventData event;
+    if(mTrackingStatisticsEnabled && mpCurrentMap)
+    {
+        event.map_valid = true;
+        event.map_id = mpCurrentMap->GetId();
+    }
     /*for(std::set<Map*>::iterator it=mspMaps.begin(), send=mspMaps.end(); it!=send; it++)
     {
         (*it)->clear();
@@ -278,6 +352,9 @@ void Atlas::clearAtlas()
     mspMaps.clear();
     mpCurrentMap = static_cast<Map*>(NULL);
     mnLastInitKFidMap = 0;
+    if(mTrackingStatisticsEnabled) event.steady_ns = EvaluationSteadyNs();
+    lock.unlock();
+    RecordEvaluationEvent(EvaluationEvent::AtlasReset, event);
 }
 
 Map* Atlas::GetCurrentMap()
