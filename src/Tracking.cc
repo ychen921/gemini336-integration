@@ -33,6 +33,7 @@
 
 #include <mutex>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 
@@ -43,16 +44,24 @@ namespace ORB_SLAM3
 {
 
 
-Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq, std::shared_ptr<spdlog::logger> logger, bool enableTrackingSnapshot):
+Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer,
+                   Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor,
+                   Settings* settings, const string &_nameSeq, std::shared_ptr<spdlog::logger> logger,
+                   bool enableTrackingSnapshot, bool enableTrackingPoseSnapshot):
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
-    mbOnlyTracking(false), mTrackingSnapshotEnabled(enableTrackingSnapshot), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
+    mbOnlyTracking(false), mTrackingSnapshotEnabled(enableTrackingSnapshot),
+    mTrackingPoseSnapshotEnabled(enableTrackingPoseSnapshot), mbMapUpdated(false), mbVO(false),
+    mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mLogger(logger ? std::move(logger) : GetModuleLogger(MakeLoggerFactory({}), "tracking")), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
     if(mTrackingSnapshotEnabled && mSensor!=System::STEREO && mSensor!=System::IMU_STEREO)
         throw std::invalid_argument("Tracking snapshots require STEREO or IMU_STEREO");
+    if(mTrackingPoseSnapshotEnabled && !mTrackingSnapshotEnabled)
+        throw std::invalid_argument("Tracking pose snapshots require tracking snapshots");
     mTrackingSnapshot.enabled = mTrackingSnapshotEnabled;
+    mTrackingSnapshot.pose_enabled = mTrackingPoseSnapshotEnabled;
 
     // Load camera parameters from settings file
     if(settings){
@@ -1470,6 +1479,45 @@ TrackingSnapshot Tracking::CaptureTrackingSnapshot() const noexcept
     return snapshot;
 }
 
+void Tracking::CapturePoseSnapshot(Map *pCurrentMap)
+{
+    if(!mTrackingPoseSnapshotEnabled) return;
+    // A reset can replace mCurrentFrame. Never attach its replacement's pose
+    // or another map's context to the source frame recorded at Track entry.
+    if(!mTrackingSnapshot.has_frame || !mTrackingSnapshot.map_id_valid ||
+       !std::isfinite(mTrackingSnapshot.sensor_timestamp_sec) ||
+       mTrackingSnapshot.frame_id != mCurrentFrame.mnId ||
+       mTrackingSnapshot.sensor_timestamp_sec != mCurrentFrame.mTimeStamp ||
+       mTrackingSnapshot.tracking_map_id != pCurrentMap->GetId())
+        return;
+
+    // These existing Map accessors briefly use mMutexMap; no new recorder lock,
+    // allocation, formatting or I/O is introduced under the map-update lock.
+    mTrackingSnapshot.map_change_index = pCurrentMap->GetMapChangeIndex();
+    mTrackingSnapshot.map_change_index_valid = true;
+    if(mSensor == System::IMU_STEREO)
+    {
+        mTrackingSnapshot.imu_initialized = pCurrentMap->isImuInitialized();
+        mTrackingSnapshot.imu_initialized_valid = true;
+    }
+    mTrackingSnapshot.pose_capture_steady_ns = EvaluationSteadyNs();
+
+    // Predicted poses during loss and default identity storage are not valid
+    // tracking measurements. IMU initialization is reported separately.
+    if((mState != OK && mState != OK_KLT) || !mCurrentFrame.HasPose()) return;
+    const Sophus::SE3f pose = mCurrentFrame.GetPose();
+    const Eigen::Vector3f translation = pose.translation();
+    const Eigen::Quaternionf rotation = pose.unit_quaternion();
+    // Reject corrupted rotations without normalizing or changing SLAM data.
+    if(!translation.allFinite() || !rotation.coeffs().allFinite() ||
+       std::abs(rotation.squaredNorm() - 1.0f) > 1e-4f)
+        return;
+
+    mTrackingSnapshot.pose_translation_cw = {{translation.x(), translation.y(), translation.z()}};
+    mTrackingSnapshot.pose_quaternion_cw_xyzw = {{rotation.x(), rotation.y(), rotation.z(), rotation.w()}};
+    mTrackingSnapshot.pose_valid = true;
+}
+
 void Tracking::SetLostState()
 {
     const bool entered = mState != LOST;
@@ -1886,6 +1934,7 @@ void Tracking::Track()
         // Reset validity even for returns before map acquisition/local tracking.
         mTrackingSnapshot = TrackingSnapshot{};
         mTrackingSnapshot.enabled = true;
+        mTrackingSnapshot.pose_enabled = mTrackingPoseSnapshotEnabled;
         mTrackingSnapshot.has_frame = true;
         mTrackingSnapshot.frame_id = mCurrentFrame.mnId;
         mTrackingSnapshot.sensor_timestamp_sec = mCurrentFrame.mTimeStamp;
@@ -2049,6 +2098,7 @@ void Tracking::Track()
         if(mState!=OK) // If rightly initialized, mState=OK
         {
             mLastFrame = Frame(mCurrentFrame);
+            CapturePoseSnapshot(pCurrentMap);
             return;
         }
 
@@ -2455,6 +2505,10 @@ void Tracking::Track()
         }
 
     }
+
+    // Still under pCurrentMap->mMutexMapUpdate: the live pose and its context
+    // must be owned values before background map/frame correction can resume.
+    CapturePoseSnapshot(pCurrentMap);
 
 #ifdef REGISTER_LOOP
     if (Stop()) {

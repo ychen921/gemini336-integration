@@ -65,7 +65,8 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     Tracking(System* pSys, ORBVocabulary* pVoc, FrameDrawer* pFrameDrawer, MapDrawer* pMapDrawer, Atlas* pAtlas,
              KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq=std::string(),
-             std::shared_ptr<spdlog::logger> logger = {}, bool enableTrackingSnapshot = false);
+             std::shared_ptr<spdlog::logger> logger = {}, bool enableTrackingSnapshot = false,
+             bool enableTrackingPoseSnapshot = false);
 
     ~Tracking();
 
@@ -215,7 +216,11 @@ protected:
     // Setup-only opt-in; all frame fields are cleared before each tracking call
     // so early returns cannot reuse a previous frame's measurements.
     const bool mTrackingSnapshotEnabled;
+    const bool mTrackingPoseSnapshotEnabled;
     TrackingSnapshot mTrackingSnapshot;
+    // Caller holds this frame's map-update lock. Copy primitives here rather
+    // than reading a potentially background-corrected Frame after Track returns.
+    void CapturePoseSnapshot(Map *pCurrentMap);
     // Record entries at their source: a same-call reset may hide raw LOST.
     void SetLostState();
     void RecordRelocalization();

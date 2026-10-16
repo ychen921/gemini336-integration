@@ -123,7 +123,8 @@ public:
            std::function<bool()> externalStopRequested = {},
            std::function<void(std::exception_ptr)> viewerStopNotification = {},
            LoggerFactory loggerFactory = {},
-           bool enableTrackingSnapshot = false);
+           bool enableTrackingSnapshot = false,
+           bool enableTrackingPoseSnapshot = false);
 
     // Obtain module handles before launching their producers. Injected loggers
     // remain usable only until the owning session is finished, after all joins.
@@ -213,7 +214,9 @@ public:
 
     // Opt-in at construction, for STEREO/IMU_STEREO only. Copies the last
     // normally returned frame under the existing state mutex; no map access.
-    // Disabled/before-first-frame snapshots have has_frame == false.
+    // Disabled/before-first-frame snapshots have has_frame == false. Pose
+    // collection requires both constructor flags and is invalid until tracking
+    // captures a valid same-frame Tcw under the existing map-update lock.
     TrackingSnapshot GetTrackingSnapshot();
     // Live cumulative insertions, including backend work after the last frame.
     // Read after Shutdown for the final value; zero when collection is disabled.
