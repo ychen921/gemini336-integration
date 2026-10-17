@@ -44,6 +44,7 @@
 #include "ImuTypes.h"
 #include "Settings.h"
 #include "TrackingSnapshot.h"
+#include "TrajectoryExport.h"
 
 
 namespace ORB_SLAM3
@@ -192,6 +193,13 @@ public:
 
     void SaveTrajectoryEuRoC(const string &filename, Map* pMap);
     void SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap);
+
+    // Explicit, owner-serialized STEREO/IMU_STEREO export after normal Shutdown.
+    // Selects one final map for both files and returns their coordinate metadata.
+    // No-data status is distinct from success; bad arguments/history/I/O throw.
+    // Does not publish files atomically or certify completion of every past GBA.
+    TrajectoryExportResult SaveEvaluationTrajectories(const string &frameFilename,
+                                                     const string &keyframeFilename);
 
     // Save data used for initialization debug
     void SaveDebugData(const int &iniIdx);

@@ -46,6 +46,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 
 add_library(${PROJECT_NAME} SHARED
 src/System.cc
+src/TrajectoryExport.cc
 src/Tracking.cc
 src/LocalMapping.cc
 src/LoopClosing.cc
@@ -74,6 +75,7 @@ src/TwoViewReconstruction.cc
 src/Config.cc
 src/Settings.cc
 include/System.h
+include/TrajectoryExport.h
 include/Tracking.h
 include/LocalMapping.h
 include/LoopClosing.h
