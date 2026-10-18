@@ -53,7 +53,8 @@ protected:
 
     void ComputeCentroid(Eigen::Matrix3f &P, Eigen::Matrix3f &Pr, Eigen::Vector3f &C);
 
-    void ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2);
+    // Failure leaves the current model unchanged; callers must skip its inlier check.
+    bool ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2);
 
     void CheckInliers();
 
@@ -82,22 +83,23 @@ protected:
     int mN1;
 
     // Current Estimation
-    Eigen::Matrix3f mR12i;
-    Eigen::Vector3f mt12i;
-    float ms12i;
-    Eigen::Matrix4f mT12i;
-    Eigen::Matrix4f mT21i;
+    Eigen::Matrix3f mR12i = Eigen::Matrix3f::Identity();
+    Eigen::Vector3f mt12i = Eigen::Vector3f::Zero();
+    float ms12i = 1.0f;
+    Eigen::Matrix4f mT12i = Eigen::Matrix4f::Identity();
+    Eigen::Matrix4f mT21i = Eigen::Matrix4f::Identity();
     std::vector<bool> mvbInliersi;
-    int mnInliersi;
+    int mnInliersi = 0;
 
     // Current Ransac State
     int mnIterations;
     std::vector<bool> mvbBestInliers;
     int mnBestInliers;
-    Eigen::Matrix4f mBestT12;
-    Eigen::Matrix3f mBestRotation;
-    Eigen::Vector3f mBestTranslation;
-    float mBestScale;
+    // Defaults are finite placeholders, not evidence of RANSAC convergence.
+    Eigen::Matrix4f mBestT12 = Eigen::Matrix4f::Identity();
+    Eigen::Matrix3f mBestRotation = Eigen::Matrix3f::Identity();
+    Eigen::Vector3f mBestTranslation = Eigen::Vector3f::Zero();
+    float mBestScale = 1.0f;
 
     // Scale is fixed to 1 in the stereo/RGBD case
     bool mbFixScale;

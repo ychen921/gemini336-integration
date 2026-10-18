@@ -19,8 +19,11 @@
 
 #include "Sim3Solver.h"
 
+#include <algorithm>
 #include <vector>
 #include <cmath>
+#include <limits>
+#include <Eigen/Geometry>
 #include <opencv2/core/core.hpp>
 
 #include "KeyFrame.h"
@@ -30,6 +33,27 @@
 
 namespace ORB_SLAM3
 {
+
+namespace
+{
+bool HasNonDegenerateTriangle(const Eigen::Matrix3f& points)
+{
+    // Double intermediates keep the geometry check safe across the finite float
+    // range. Area relative to the longest edge avoids a threshold in metres.
+    const Eigen::Vector3d edge01 = points.col(1).cast<double>() - points.col(0).cast<double>();
+    const Eigen::Vector3d edge02 = points.col(2).cast<double>() - points.col(0).cast<double>();
+    const double longestEdgeSquared = std::max(edge01.squaredNorm(),
+        std::max(edge02.squaredNorm(), (edge02 - edge01).squaredNorm()));
+    if(!(longestEdgeSquared > 0.0)) return false;
+
+    const double relativeAreaSquared = edge01.cross(edge02).squaredNorm() /
+        (longestEdgeSquared * longestEdgeSquared);
+    // Collinear and float-precision ill-conditioned triangles cannot constrain
+    // a stable rotation. A non-collinear planar triangle remains valid.
+    return std::isfinite(relativeAreaSquared) &&
+        relativeAreaSquared > static_cast<double>(std::numeric_limits<float>::epsilon());
+}
+} // namespace
 
 
 Sim3Solver::Sim3Solver(KeyFrame *pKF1, KeyFrame *pKF2, const vector<MapPoint *> &vpMatched12, const bool bFixScale,
@@ -152,7 +176,7 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
     vbInliers = vector<bool>(mN1,false);
     nInliers=0;
 
-    if(N<mRansacMinInliers)
+    if(N<3 || N<mRansacMinInliers)
     {
         bNoMore = true;
         return Eigen::Matrix4f::Identity();
@@ -185,7 +209,9 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
             vAvailableIndices.pop_back();
         }
 
-        ComputeSim3(P3Dc1i,P3Dc2i);
+        // Rejected samples still consume the iteration budget, but must not
+        // reuse a previous model in CheckInliers or update the best model.
+        if(!ComputeSim3(P3Dc1i,P3Dc2i)) continue;
 
         CheckInliers();
 
@@ -222,7 +248,7 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
     vbInliers = vector<bool>(mN1,false);
     nInliers=0;
 
-    if(N<mRansacMinInliers)
+    if(N<3 || N<mRansacMinInliers)
     {
         bNoMore = true;
         return Eigen::Matrix4f::Identity();
@@ -235,7 +261,9 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
 
     int nCurrentIterations = 0;
 
-    Eigen::Matrix4f bestSim3;
+    // All samples may be rejected; convergence/inlier flags identify this
+    // placeholder as a failed search rather than an identity-pose solution.
+    Eigen::Matrix4f bestSim3 = Eigen::Matrix4f::Identity();
 
     while(mnIterations<mRansacMaxIts && nCurrentIterations<nIterations)
     {
@@ -258,7 +286,7 @@ Eigen::Matrix4f Sim3Solver::iterate(int nIterations, bool &bNoMore, vector<bool>
             vAvailableIndices.pop_back();
         }
 
-        ComputeSim3(P3Dc1i,P3Dc2i);
+        if(!ComputeSim3(P3Dc1i,P3Dc2i)) continue;
 
         CheckInliers();
 
@@ -308,10 +336,16 @@ void Sim3Solver::ComputeCentroid(Eigen::Matrix3f &P, Eigen::Matrix3f &Pr, Eigen:
 }
 
 
-void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
+bool Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 {
     // Custom implementation of:
     // Horn 1987, Closed-form solution of absolute orientataion using unit quaternions
+
+    // Invalid RANSAC draws are expected and deliberately produce no per-sample
+    // log or synchronous write. Let the caller continue with another draw.
+    if(!P1.allFinite() || !P2.allFinite() ||
+       !HasNonDegenerateTriangle(P1) || !HasNonDegenerateTriangle(P2))
+        return false;
 
     // Step 1: Centroid and relative coordinates
 
@@ -322,10 +356,14 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
 
     ComputeCentroid(P1,Pr1,O1);
     ComputeCentroid(P2,Pr2,O2);
+    if(!O1.allFinite() || !O2.allFinite() || !Pr1.allFinite() || !Pr2.allFinite())
+        return false;
 
     // Step 2: Compute M matrix
 
     Eigen::Matrix3f M = Pr2 * Pr1.transpose();
+    // Finite inputs can still overflow or underflow during float products.
+    if(!M.allFinite() || !(M.cwiseAbs().maxCoeff() > 0.0f)) return false;
 
     // Step 3: Compute N matrix
     double N11, N12, N13, N14, N22, N23, N24, N33, N34, N44;
@@ -347,71 +385,85 @@ void Sim3Solver::ComputeSim3(Eigen::Matrix3f &P1, Eigen::Matrix3f &P2)
          N12, N22, N23, N24,
          N13, N23, N33, N34,
          N14, N24, N34, N44;
+    if(!N.allFinite()) return false;
 
 
     // Step 4: Eigenvector of the highest eigenvalue
     Eigen::EigenSolver<Eigen::Matrix4f> eigSolver;
     eigSolver.compute(N);
+    // Eigen outputs are not usable after a failed decomposition.
+    if(eigSolver.info() != Eigen::Success) return false;
 
     Eigen::Vector4f eval = eigSolver.eigenvalues().real();
     Eigen::Matrix4f evec = eigSolver.eigenvectors().real(); //evec[0] is the quaternion of the desired rotation
+    if(!eval.allFinite() || !evec.allFinite()) return false;
 
     int maxIndex; // should be zero
     eval.maxCoeff(&maxIndex);
 
-    Eigen::Vector3f vec = evec.block<3,1>(1,maxIndex); //extract imaginary part of the quaternion (sin*axis)
-
-    // Rotation angle. sin is the norm of the imaginary part, cos is the real part
-    double ang=atan2(vec.norm(),evec(0,maxIndex));
-
-    vec = 2*ang*vec/vec.norm(); //Angle-axis representation. quaternion angle is the half
-    mR12i = Sophus::SO3f::exp(vec).matrix();
+    // Eigen returns w,x,y,z. Direct conversion handles both signs of an
+    // identity quaternion without dividing by its zero imaginary-part norm.
+    Eigen::Quaternionf quaternion(evec(0,maxIndex), evec(1,maxIndex),
+                                  evec(2,maxIndex), evec(3,maxIndex));
+    const float quaternionNorm = quaternion.norm();
+    if(!std::isfinite(quaternionNorm) || !(quaternionNorm > 0.0f)) return false;
+    quaternion.normalize();
+    const Eigen::Matrix3f rotation = quaternion.toRotationMatrix();
+    if(!rotation.allFinite()) return false;
 
     // Step 5: Rotate set 2
-    Eigen::Matrix3f P3 = mR12i*Pr2;
+    const Eigen::Matrix3f P3 = rotation*Pr2;
+    if(!P3.allFinite()) return false;
 
     // Step 6: Scale
 
+    float scale = 1.0f;
     if(!mbFixScale)
     {
-        double cvnom = Converter::toCvMat(Pr1).dot(Converter::toCvMat(P3));
-        double nom = (Pr1.array() * P3.array()).sum();
-        if (abs(nom-cvnom)>1e-3)
-        {
-            Map* map = mpKF1->GetMap();
-            LogMapStream(map ? map->GetLogger() : nullptr, spdlog::level::debug, [&](std::ostream &report) { report << "sim3 solver: " << abs(nom-cvnom) << std::endl << nom << std::endl; });
-        }
-        Eigen::Array<float,3,3> aux_P3;
-        aux_P3 = P3.array() * P3.array();
-        double den = aux_P3.sum();
+        // Keep the scale calculation free of per-draw logging and diagnostic
+        // OpenCV allocations, including draws rejected by the range checks.
+        const double nom = (Pr1.array() * P3.array()).sum();
+        const Eigen::Array<float,3,3> aux_P3 = P3.array() * P3.array();
+        const double den = aux_P3.sum();
 
-        ms12i = nom/den;
+        if(!std::isfinite(nom) || !std::isfinite(den) || !(den > 0.0)) return false;
+        scale = static_cast<float>(nom/den);
     }
-    else
-        ms12i = 1.0f;
+    // The inverse transform requires a positive, finite, invertible scale.
+    if(!std::isfinite(scale) || !(scale > 0.0f) || !std::isfinite(1.0f/scale)) return false;
 
     // Step 7: Translation
-    mt12i = O1 - ms12i * mR12i * O2;
+    const Eigen::Vector3f translation = O1 - scale * rotation * O2;
 
     // Step 8: Transformation
 
     // Step 8.1 T12
-    mT12i.setIdentity();
+    Eigen::Matrix4f transform12 = Eigen::Matrix4f::Identity();
 
-    Eigen::Matrix3f sR = ms12i*mR12i;
-    mT12i.block<3,3>(0,0) = sR;
-    mT12i.block<3,1>(0,3) = mt12i;
+    const Eigen::Matrix3f sR = scale*rotation;
+    transform12.block<3,3>(0,0) = sR;
+    transform12.block<3,1>(0,3) = translation;
 
 
     // Step 8.2 T21
-    mT21i.setIdentity();
-    Eigen::Matrix3f sRinv = (1.0/ms12i)*mR12i.transpose();
+    Eigen::Matrix4f transform21 = Eigen::Matrix4f::Identity();
+    const Eigen::Matrix3f sRinv = (1.0f/scale)*rotation.transpose();
 
-    // sRinv.copyTo(mT21i.rowRange(0,3).colRange(0,3));
-    mT21i.block<3,3>(0,0) = sRinv;
+    transform21.block<3,3>(0,0) = sRinv;
 
-    Eigen::Vector3f tinv = -sRinv * mt12i;
-    mT21i.block<3,1>(0,3) = tinv;
+    const Eigen::Vector3f tinv = -sRinv * translation;
+    transform21.block<3,1>(0,3) = tinv;
+    if(!translation.allFinite() || !transform12.allFinite() || !transform21.allFinite())
+        return false;
+
+    // Publish only a fully validated model. A rejected draw cannot partially
+    // overwrite the state retained from the last successful computation.
+    mR12i = rotation;
+    ms12i = scale;
+    mt12i = translation;
+    mT12i = transform12;
+    mT21i = transform21;
+    return true;
 }
 
 
