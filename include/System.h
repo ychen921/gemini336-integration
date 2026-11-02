@@ -44,6 +44,7 @@
 #include "ImuTypes.h"
 #include "Settings.h"
 #include "TrackingSnapshot.h"
+#include "MapOutput.h"
 #include "TrajectoryExport.h"
 
 
@@ -226,6 +227,8 @@ public:
     // collection requires both constructor flags and is invalid until tracking
     // captures a valid same-frame Tcw under the existing map-update lock.
     TrackingSnapshot GetTrackingSnapshot();
+    // Same owner serialization as TrackStereo; never overlap reset/shutdown.
+    MapOutputSnapshot CollectMapOutput();
     // Live cumulative insertions, including backend work after the last frame.
     // Read after Shutdown for the final value; zero when collection is disabled.
     std::uint64_t GetInsertedKeyFramesTotal() const noexcept;

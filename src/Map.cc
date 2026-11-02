@@ -227,6 +227,7 @@ void Map::SetStoredMap()
 
 void Map::clear()
 {
+    MarkOutputReferenceChanged();
 //    for(set<MapPoint*>::iterator sit=mspMapPoints.begin(), send=mspMapPoints.end(); sit!=send; sit++)
 //        delete *sit;
 
@@ -266,6 +267,7 @@ bool Map::IsBad()
 void Map::ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool bScaledVel)
 {
     unique_lock<mutex> lock(mMutexMap);
+    MarkOutputReferenceChanged();
 
     // Body position (IMU) of first keyframe is fixed to (0,0,0)
     Sophus::SE3f Tyw = T;
@@ -334,6 +336,7 @@ bool Map::GetIniertialBA2()
 
 void Map::ChangeId(long unsigned int nId)
 {
+    MarkOutputReferenceChanged();
     mnId = nId;
 }
 

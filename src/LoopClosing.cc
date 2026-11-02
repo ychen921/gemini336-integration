@@ -124,6 +124,9 @@ void LoopClosing::RunLoop()
 
         if(CheckNewKeyFrames())
         {
+            // Covers detection-driven culling, loop and both merge paths as one
+            // mutation batch. Shared admission preserves mapper/GBA concurrency.
+            const MapOutputMutation outputAdmission = mpAtlas->AdmitMapOutputMutation();
             // System wires worker pointers before publishing the first keyframe.
             mpLocalMapper->RethrowFailure();
             if(mpLastCurrentKF)
@@ -1997,6 +2000,9 @@ void LoopClosing::MergeLocal2()
         // Get Merge Map Mutex (This section stops tracking!!)
         unique_lock<mutex> currentLock(pCurrentMap->mMutexMapUpdate); // We update the current map with the Merge information
         unique_lock<mutex> mergeLock(pMergeMap->mMutexMapUpdate); // We remove the Kfs and MPs in the merged area from the old map
+        // The inertial merge can preserve the active map ID while redefining
+        // its reference. Keep output identity independent of evaluation events.
+        pCurrentMap->MarkOutputReferenceChanged();
 
         if(mpAtlas->TrackingStatisticsEnabled())
         {
@@ -2415,6 +2421,9 @@ void LoopClosing::ResetIfRequested()
 void LoopClosing::RunGlobalBundleAdjustment(Map* pActiveMap, unsigned long nLoopKF,
                                            std::uint64_t generation)
 {  
+    // Include optimization as well as application: nLoopKF==0 can write live
+    // poses directly. Never hold a Core map/GBA lock before taking admission.
+    const MapOutputMutation outputAdmission = mpAtlas->AdmitMapOutputMutation();
     Log(mLogger, spdlog::level::info, "{}", "Starting Global Bundle Adjustment");
 
 #ifdef REGISTER_TIMES

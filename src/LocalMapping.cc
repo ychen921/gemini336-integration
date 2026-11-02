@@ -131,6 +131,10 @@ void LocalMapping::RunLoop()
         // Check if there are keyframes in the queue
         if(CheckNewKeyFrames() && !mbBadImu)
         {
+            // Outermost admission covers the complete mutation batch, including
+            // culling/initialization paths that do not hold mMutexMapUpdate.
+            // Other workers remain concurrent; an output collector only tries.
+            const MapOutputMutation outputAdmission = mpAtlas->AdmitMapOutputMutation();
 #ifdef REGISTER_TIMES
             double timeLBA_ms = 0;
             double timeKFCulling_ms = 0;

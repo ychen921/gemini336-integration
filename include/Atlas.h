@@ -26,10 +26,12 @@
 #include "Pinhole.h"
 #include "KannalaBrandt8.h"
 #include "TrackingSnapshot.h"
+#include "MapOutput.h"
 
 #include <set>
 #include <mutex>
 #include <atomic>
+#include <shared_mutex>
 #include <cstdint>
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/export.hpp>
@@ -93,6 +95,16 @@ public:
     // Rare events only; counters survive asynchronous log loss and map resets.
     void RecordEvaluationEvent(EvaluationEvent type, EvaluationEventData event);
     EvaluationEventTotals GetEvaluationEventTotals() const noexcept;
+
+    // Owner-serialized with Tracking/reset/shutdown. Background mutations take
+    // shared admission; collection tries exclusive admission without waiting.
+    // Long-running BA/merge can skip multiple collection attempts. Admission is
+    // released during worker idle sleeps. No Core pointer escapes the result.
+    MapOutputSnapshot CollectMapOutput();
+    MapOutputMutation AdmitMapOutputMutation()
+    {
+        return MapOutputMutation(mMutexMapOutput, mMapOutputFailed);
+    }
 
     void CreateNewMap();
     void ChangeMap(Map* pMap);
@@ -190,6 +202,14 @@ protected:
 
     // Mutex
     std::mutex mMutexAtlas;
+
+    // Outermost admission only: never acquire while holding map/object locks.
+    // Writers share it, preserving existing background-worker concurrency.
+    std::shared_mutex mMutexMapOutput;
+    std::atomic<bool> mMapOutputFailed{false};
+    Map* mLastOutputMap = nullptr;
+    std::uint64_t mLastOutputReferenceChange = 0;
+    std::uint64_t mOutputGeneration = 0;
 
 
 }; // class Atlas

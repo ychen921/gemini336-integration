@@ -27,6 +27,7 @@
 #include <set>
 #include <pangolin/pangolin.h>
 #include <mutex>
+#include <cstdint>
 
 #include <boost/serialization/base_object.hpp>
 
@@ -136,6 +137,11 @@ public:
     bool CheckEssentialGraph();
     void ChangeId(long unsigned int nId);
 
+    // Called at reference-changing commits under existing map-update locking
+    // (or owner-only reset). Admission excludes collectors, not other writers.
+    void MarkOutputReferenceChanged() { ++mOutputReferenceChange; }
+    std::uint64_t OutputReferenceChange() const { return mOutputReferenceChange; }
+
     unsigned int GetLowerKFID();
 
     void PreSave(std::set<GeometricCamera*> &spCams);
@@ -168,6 +174,7 @@ protected:
     std::shared_ptr<spdlog::logger> mLogger;
 
     long unsigned int mnId;
+    std::uint64_t mOutputReferenceChange = 0;
 
     std::set<MapPoint*> mspMapPoints;
     std::set<KeyFrame*> mspKeyFrames;

@@ -22,9 +22,82 @@
 #include "GeometricCamera.h"
 #include "Pinhole.h"
 #include "KannalaBrandt8.h"
+#include <cmath>
+#include <stdexcept>
 
 namespace ORB_SLAM3
 {
+
+MapOutputSnapshot Atlas::CollectMapOutput()
+{
+    MapOutputSnapshot result;
+    // Try admission BEFORE Atlas/map locks. Worker sections admit one another
+    // in shared mode, including merge -> mapper/GBA waits; collection never waits.
+    std::unique_lock<std::shared_mutex> admission(mMutexMapOutput, std::try_to_lock);
+    if(!admission.owns_lock()) return result;
+    if(mMapOutputFailed.load())
+        throw std::runtime_error("Cannot collect map output after a failed background mutation");
+    std::unique_lock<std::mutex> atlasLock(mMutexAtlas, std::try_to_lock);
+    if(!atlasLock.owns_lock()) return result;
+    Map* const map = mpCurrentMap;
+    if(!map)
+    {
+        result.status = MapOutputStatus::NoActiveMap;
+        return result;
+    }
+    std::unique_lock<std::mutex> updateLock(map->mMutexMapUpdate, std::try_to_lock);
+    if(!updateLock.owns_lock() || map->IsBad()) return result;
+
+    // Owner serialization excludes Tracking/reset; exclusive admission excludes
+    // ALL background mutation sections, including updates outside MapUpdate.
+    // Membership locks are released by the getters before reading object locks.
+    const std::vector<MapPoint*> points = map->GetAllMapPoints();
+    const std::vector<KeyFrame*> keyframes = map->GetAllKeyFrames();
+    result.map_points.reserve(points.size());
+    result.keyframes.reserve(keyframes.size());
+    for(MapPoint* point : points)
+    {
+        if(!point || point->isBad() || point->GetMap() != map) continue;
+        const Eigen::Vector3f position = point->GetWorldPos();
+        if(position.allFinite())
+            result.map_points.push_back({{position.x(), position.y(), position.z()}});
+    }
+    for(KeyFrame* keyframe : keyframes)
+    {
+        if(!keyframe || keyframe->isBad() || keyframe->GetMap() != map ||
+           !std::isfinite(keyframe->mTimeStamp) || keyframe->mTimeStamp < 0.0) continue;
+        // Validate Tcw before inversion: corrupted Sophus rotation storage must
+        // not reach inverse/matrix operations that assume a unit quaternion.
+        const Sophus::SE3f pose = keyframe->GetPose();
+        const Eigen::Quaterniond rotation = pose.unit_quaternion().cast<double>();
+        const Eigen::Vector3d translation = pose.translation().cast<double>();
+        if(!translation.allFinite() || !rotation.coeffs().allFinite() ||
+           std::abs(rotation.squaredNorm() - 1.0) > 1e-4) continue;
+        const Eigen::Quaterniond rotation_wc = rotation.normalized().conjugate();
+        const Eigen::Vector3d translation_wc = -(rotation_wc * translation);
+        MapOutputKeyFrame value;
+        value.id = keyframe->mnId;
+        value.timestamp = keyframe->mTimeStamp;
+        value.camera_pose.translation = {{translation_wc.x(), translation_wc.y(), translation_wc.z()}};
+        value.camera_pose.quaternion_xyzw = {{rotation_wc.x(), rotation_wc.y(), rotation_wc.z(), rotation_wc.w()}};
+        result.keyframes.push_back(value);
+    }
+
+    // Generation describes successive sampled active-map references, independent
+    // of evaluation/logging and ordinary BA revisions. Maps are not deleted or
+    // reused during this owner-serialized standalone session (persistence excluded).
+    const std::uint64_t referenceChange = map->OutputReferenceChange();
+    if(mLastOutputMap != map || mLastOutputReferenceChange != referenceChange)
+    {
+        ++mOutputGeneration;
+        mLastOutputMap = map;
+        mLastOutputReferenceChange = referenceChange;
+    }
+    result.map_id = map->GetId();
+    result.generation = mOutputGeneration;
+    result.status = MapOutputStatus::Ready;
+    return result;
+}
 
 Atlas::Atlas(){
     SetLoggers({}, {});

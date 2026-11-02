@@ -1150,6 +1150,15 @@ TrackingSnapshot System::GetTrackingSnapshot()
     return mTrackingSnapshot;
 }
 
+MapOutputSnapshot System::CollectMapOutput()
+{
+    // A failed worker may have left a partial commit; never visualize it as a
+    // successful coherent sample. Preserve its original failure for the owner.
+    mpLocalMapper->RethrowFailure();
+    mpLoopCloser->RethrowFailure();
+    return mpAtlas->CollectMapOutput();
+}
+
 std::uint64_t System::GetInsertedKeyFramesTotal() const noexcept
 {
     return mpAtlas->GetInsertedKeyFramesTotal();
