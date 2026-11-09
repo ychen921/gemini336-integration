@@ -119,6 +119,8 @@ public:
     // and its captured resources must remain valid until that thread joins.
     // Logger factory use is setup-only. Its session must outlive all producers;
     // configured factory failures propagate before any worker threads launch.
+    // Output-pose capture independently enables the numerical frame snapshot;
+    // Atlas evaluation counters/events remain controlled by enableTrackingSnapshot.
     System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
            const bool bUseViewer = true, const int initFr = 0,
            const string &strSequence = std::string(),
@@ -126,7 +128,8 @@ public:
            std::function<void(std::exception_ptr)> viewerStopNotification = {},
            LoggerFactory loggerFactory = {},
            bool enableTrackingSnapshot = false,
-           bool enableTrackingPoseSnapshot = false);
+           bool enableTrackingPoseSnapshot = false,
+           bool enableOutputPose = false);
 
     // Obtain module handles before launching their producers. Injected loggers
     // remain usable only until the owning session is finished, after all joins.

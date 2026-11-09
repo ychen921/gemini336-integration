@@ -83,6 +83,11 @@ struct TrackingSnapshot
     // world points into the left camera frame; it is not an optimized history.
     bool pose_enabled = false;
     bool pose_valid = false;
+    // Captured with the pose under map-update protection, never inferred from
+    // a later map collection. Diagnostic pose validity remains independent.
+    bool output_context_valid = false;
+    std::uint64_t output_map_id = 0;
+    std::uint64_t output_generation = 0;
     bool map_change_index_valid = false;
     bool imu_initialized_valid = false; // N/A for non-inertial stereo.
     bool imu_initialized = false;

@@ -32,6 +32,7 @@
 #include <mutex>
 #include <atomic>
 #include <shared_mutex>
+#include <optional>
 #include <cstdint>
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/export.hpp>
@@ -101,6 +102,9 @@ public:
     // Long-running BA/merge can skip multiple collection attempts. Admission is
     // released during worker idle sleeps. No Core pointer escapes the result.
     MapOutputSnapshot CollectMapOutput();
+    // Caller holds this map's update lock. Atlas lock is acquired briefly;
+    // map collection only tries the reverse edge, so it never waits in a cycle.
+    std::optional<MapOutputContext> CaptureMapOutputContext(Map* map);
     MapOutputMutation AdmitMapOutputMutation()
     {
         return MapOutputMutation(mMutexMapOutput, mMapOutputFailed);
@@ -170,6 +174,9 @@ public:
     long unsigned int GetNumLivedMP();
 
 protected:
+
+    // Requires Atlas lock and a stable map reference (map-update or admission).
+    MapOutputContext UpdateMapOutputContext(Map* map);
 
     std::shared_ptr<spdlog::logger> mLogger;
     std::shared_ptr<spdlog::logger> mMapLogger;

@@ -1502,6 +1502,16 @@ void Tracking::CapturePoseSnapshot(Map *pCurrentMap)
     }
     mTrackingSnapshot.pose_capture_steady_ns = EvaluationSteadyNs();
 
+    // Pose output and map collection share one Atlas context allocator. This
+    // does not take full-map admission or copy any mapping geometry.
+    const std::optional<MapOutputContext> context = mpAtlas->CaptureMapOutputContext(pCurrentMap);
+    if(context)
+    {
+        mTrackingSnapshot.output_context_valid = true;
+        mTrackingSnapshot.output_map_id = context->map_id;
+        mTrackingSnapshot.output_generation = context->generation;
+    }
+
     // Predicted poses during loss and default identity storage are not valid
     // tracking measurements. IMU initialization is reported separately.
     if((mState != OK && mState != OK_KLT) || !mCurrentFrame.HasPose()) return;

@@ -83,6 +83,15 @@ MapOutputSnapshot Atlas::CollectMapOutput()
         result.keyframes.push_back(value);
     }
 
+    const MapOutputContext context = UpdateMapOutputContext(map);
+    result.map_id = context.map_id;
+    result.generation = context.generation;
+    result.status = MapOutputStatus::Ready;
+    return result;
+}
+
+MapOutputContext Atlas::UpdateMapOutputContext(Map* map)
+{
     // Generation describes successive sampled active-map references, independent
     // of evaluation/logging and ordinary BA revisions. Maps are not deleted or
     // reused during this owner-serialized standalone session (persistence excluded).
@@ -93,10 +102,15 @@ MapOutputSnapshot Atlas::CollectMapOutput()
         mLastOutputMap = map;
         mLastOutputReferenceChange = referenceChange;
     }
-    result.map_id = map->GetId();
-    result.generation = mOutputGeneration;
-    result.status = MapOutputStatus::Ready;
-    return result;
+    return {map->GetId(), mOutputGeneration};
+}
+
+std::optional<MapOutputContext> Atlas::CaptureMapOutputContext(Map* map)
+{
+    const std::lock_guard<std::mutex> lock(mMutexAtlas);
+    if(!map || mpCurrentMap != map || map->IsBad() || mMapOutputFailed.load())
+        return std::nullopt;
+    return UpdateMapOutputContext(map);
 }
 
 Atlas::Atlas(){

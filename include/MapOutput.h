@@ -32,6 +32,12 @@ private:
 };
 
 // Values only: no object lifetime or Eigen alignment requirements cross this API.
+struct MapOutputContext
+{
+    std::uint64_t map_id = 0;
+    std::uint64_t generation = 0;
+};
+
 struct MapOutputPose
 {
     std::array<double, 3> translation{};
